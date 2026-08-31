@@ -15,6 +15,11 @@ checks above. The same fact, greppable:
 
     grep -rn "connectivity.providers" app/ | grep -v "^app/crm/connectivity/providers/"
 
+Any OTHER hit is something reaching a provider without passing the checks
+above. The other two are allowed because neither sends a message: webhooks.py
+RECEIVES from a provider, and subscribe.py administers an account. The law
+protects the path to a customer, not every call to a vendor.
+
 Two things this file deliberately does NOT do:
 
   · Decide what a failure means. It reports; dispatch.py's retry ladder

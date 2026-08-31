@@ -221,6 +221,32 @@ def binding_by_id_query(
     return query, [merchant_id, binding_id, channel]
 
 
+def binding_by_address_query(channel: str, address: str) -> Tuple[str, List[Any]]:
+    """The pipe an inbound fact ARRIVED on — the one lookup with no merchant.
+
+    Deliberate, and the only direction it can work: a delivery receipt or a
+    customer's reply names the receiving endpoint and nothing else, so this
+    row is HOW the merchant is learned. 057 built the index that makes the
+    answer unambiguous — crm_channel_binding_address_uq on (channel, address)
+    WHERE status <> 'retired' — and this WHERE clause matches that predicate
+    exactly, so at most one row can ever come back. Widening it would let a
+    recycled number match a retired row as well as its live one, and filing a
+    letter under the wrong merchant is a cross-tenant leak.
+
+    'paused' is included where the send path takes only 'active': pausing
+    stops us SENDING from a number, it does not stop facts about messages
+    already sent from arriving, and dropping those would lose real events.
+    """
+    query = f"""
+        SELECT {BINDING_COLUMNS}
+          FROM {BINDING_TABLE}
+         WHERE channel = $1
+           AND address = $2
+           AND status <> 'retired'
+    """
+    return query, [channel, address]
+
+
 def installation_by_id_query(
     merchant_id: str, installation_id: str
 ) -> Tuple[str, List[Any]]:

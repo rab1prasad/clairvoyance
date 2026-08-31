@@ -30,8 +30,9 @@ PR time — earlier than a grant would fail:
      logic; accessors self-scope single statements and batch loops. A
      logic file touches a handle ONLY as an _in_txn body's txn param.
   11. ADAPTER CONFINEMENT — app.crm.connectivity.providers is imported
-     only by app/crm/connectivity/send.py and inside providers/ itself;
-     any other import reaches a provider around the send() door's checks.
+     only by the module-root doors named in PROVIDER_DOORS and inside
+     providers/ itself; any other import reaches a provider around the
+     checks its door performs.
   12. RECORD HEARS, NEVER CALLS — app/crm/record imports no subscriber
      module (identity + shared only): consumers register through
      record/consumers.py from worker_main, so subscriber -> record is the
@@ -61,6 +62,21 @@ TABLE_OWNERS = {
     "crm_workflow_enrollment": "outreach",
     "crm_connector_installation": "connectivity",
     "crm_channel_binding": "connectivity",
+}
+
+# ---- rule 11: who may reach an adapter ------------------------------------
+# One file per DIRECTION of provider traffic, and the set is closed at three
+# because there are only three: we send to a provider, we receive from one,
+# and we administer an account at one. Each door does the checks its
+# direction needs — send() the route and the suppression gate, webhooks the
+# signature, subscribe the tenant scope — which is the whole point of making
+# providers/ unreachable from anywhere else. A fourth entry has to name a
+# fourth direction; "this file also needs the token" is a reason to call the
+# door, not to open one.
+PROVIDER_DOORS = {
+    "app/crm/connectivity/send.py",
+    "app/crm/connectivity/webhooks.py",
+    "app/crm/connectivity/subscribe.py",
 }
 
 # Pre-existing legacy inversions, allowlisted and CLOSED to additions
@@ -176,14 +192,16 @@ def check(root: Path = ROOT) -> list[str]:
                         f"{rp}: the data layer imports neither app.ai nor "
                         f"app.crm ({target}) — use the hook-registry pattern"
                     )
-            # 11. adapter confinement — providers/ sits behind the send() door
+            # 11. adapter confinement — providers/ sits behind its doors
             if target.startswith("app.crm.connectivity.providers"):
-                if rp != "app/crm/connectivity/send.py" and not rp.startswith(
+                if rp not in PROVIDER_DOORS and not rp.startswith(
                     "app/crm/connectivity/providers/"
                 ):
+                    doors = ", ".join(sorted(Path(d).name for d in PROVIDER_DOORS))
                     errors.append(
-                        f"{rp}: adapter import outside send.py ({target}) — "
-                        f"providers/ is reached only through the send() door"
+                        f"{rp}: adapter import outside the provider doors "
+                        f"({target}) — providers/ is reached only through "
+                        f"{doors}"
                     )
             # 12. record hears, never calls — the spine's owner imports no
             # subscriber (not even its contracts; worker_main registers them

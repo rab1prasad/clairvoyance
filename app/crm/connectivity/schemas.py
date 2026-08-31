@@ -113,6 +113,35 @@ class CredentialBundle(BaseModel):
         return value if isinstance(value, str) and value else None
 
 
+# The topics a letter may carry, channel-agnostic by canon: a delivery
+# receipt means the same thing to a funnel query whatever carried it, so the
+# channel rides in the event's source and payload. They sit next to the shape
+# whose field they populate — one place to read what `topic` can be.
+TOPIC_STATUS = "message.status"
+TOPIC_INBOUND = "message.inbound"
+
+
+class InboundLetter(BaseModel):
+    """One fact a provider told us, ready to be filed in the event spine.
+
+    The seam between a provider's shape and this module's: an adapter reads a
+    callback body and returns these, and nothing downstream needs to know what
+    the provider's envelope looked like.
+
+    ``address`` is the endpoint it arrived on — one callback may legitimately
+    carry letters for several merchants' numbers, so tenancy is resolved per
+    letter rather than per request. ``payload`` stays the provider's own
+    object, because the spine records the letter they sent and never our
+    reading of it.
+    """
+
+    address: str
+    topic: str
+    external_id: str
+    payload: Dict[str, Any] = {}
+    occurred_at: Optional[datetime] = None
+
+
 class SendRoute(BaseModel):
     """Everything a sender needs, resolved in one call — so no adapter ever
     asks the database anything, which is what keeps them testable without

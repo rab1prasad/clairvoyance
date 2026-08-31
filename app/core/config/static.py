@@ -541,6 +541,32 @@ META_WHATSAPP_GRAPH_BASE_URL = os.environ.get(
 )
 META_WHATSAPP_GRAPH_VERSION = os.environ.get("META_WHATSAPP_GRAPH_VERSION", "v23.0")
 
+# Inbound webhooks. Both secrets are PLATFORM-level, not per-merchant, and
+# that is forced rather than chosen: the payload that names the merchant
+# cannot be trusted until the signature is verified, and verifying it needs
+# the secret — so the secret cannot depend on the payload. One Meta app, one
+# app secret.
+#
+# Absent means every webhook is refused (fail closed). That is the correct
+# posture for a public unauthenticated route: an endpoint that accepts
+# unverifiable bodies is an endpoint anyone can write delivery receipts to.
+#
+# META_APP_SECRET is deliberately named to match the Embedded Signup
+# onboarding work (PR #1038), which reads the same Meta app's secret for the
+# OAuth code exchange. One app, one secret, one variable — two names would
+# eventually be set to two different values.
+META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
+
+# Echoed back once, when the callback URL is registered in the Meta app.
+META_WEBHOOK_VERIFY_TOKEN = os.environ.get("META_WEBHOOK_VERIFY_TOKEN", "")
+
+# DSN for the OPT-IN, DB-backed webhook integration tests and nothing else.
+# None (unset) means those tests skip. Declared here rather than read in the
+# test module: os.environ reads live in static config only, and the rule has
+# no test-file exception.
+CRM_WEBHOOK_TEST_DSN = os.environ.get("CRM_WEBHOOK_TEST_DSN") or None
+
+
 # Announcement Banner Configuration
 DEFAULT_ANNOUNCEMENT_BANNER_TEXT_COLOR = os.environ.get(
     "DEFAULT_ANNOUNCEMENT_BANNER_TEXT_COLOR", "white"

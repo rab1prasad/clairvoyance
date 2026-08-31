@@ -5,7 +5,10 @@ taught that a CHECK constraint turns "support a new channel" into a
 migration, a deploy window and a rollback plan. Here a new channel is
 providers/<name>.py plus one line below. Nothing else.
 
-Imported ONLY by send.py — the point of putting adapters behind one door:
+Imported only by the three module-root files that orchestrate provider work
+— send.py (sends), webhooks.py (receives) and subscribe.py (administers an
+account). That is the point of one door for adapters, and this grep should
+name no others:
 
     grep -rn "connectivity.providers" app/ | grep -v "^app/crm/connectivity/providers/"
 """

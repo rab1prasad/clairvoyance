@@ -4,6 +4,19 @@ A child implements two things — build the request, read the answer — and
 inherits what must never vary between channels: transport-failure
 classification, address masking, and the fact that policy is not its job.
 
+This interface is about SENDING, and deliberately only that. Receiving a
+provider's callbacks is not here, because the uniformity that makes `deliver`
+work outbound does not hold inbound: providers differ on whether they push or
+we poll, whether they batch, how they authenticate (signature over the body,
+over URL+body, a secret in the path, mTLS), and whether per-account
+subscription exists at all. Worse, that variation runs per PROVIDER, not per
+channel — one Meta app serves WhatsApp, Instagram and Messenger through one
+callback with one signature scheme. A per-channel webhook interface would
+split identical code across channel keys while leaving the axis that actually
+differs unabstracted. So webhook handling lives in the provider module that
+needs it, and a seam gets introduced when a second provider makes its real
+shape known.
+
 The split that matters: an adapter CLASSIFIES, it never DECIDES. It reports
 what the provider did (accepted; failed, plausibly-retryable or not);
 dispatch.plan_for_outcome alone turns that into queued / failed / dead.

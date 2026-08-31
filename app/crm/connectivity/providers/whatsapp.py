@@ -1,8 +1,18 @@
 """WhatsApp, straight at Meta's Cloud API — no aggregator in between.
 
-The first child of ChannelAdapter, and the shape every later one copies:
-build a request from the manifest row, read the answer, classify it. Nothing
-here decides whether to retry, only whether retrying could plausibly differ.
+The first child of ChannelAdapter and the shape every later one copies. This
+file owns EVERYTHING Meta-shaped, in both directions:
+
+  outbound  build a request from the manifest row, read the answer, classify
+            it — without deciding whether to retry, only whether retrying
+            could plausibly differ;
+  inbound   verify their signature, answer their handshake, unwrap their
+            entry/changes/value envelope into letters, and subscribe an
+            account so those callbacks start arriving.
+
+None of the inbound half is general. Another provider signs a different way
+over different bytes and nests its events differently, which is exactly why
+it lives here rather than in the module's shared code.
 
 Sends are template-only by design, not by omission: the manifest stores
 template_id + variables and never a rendered string, because Meta renders the
@@ -16,14 +26,19 @@ Credential bundle (written by onboarding, read here):
     verify_token        the webhook handshake secret     [phase 3]
 """
 
+import hashlib
+import hmac
 import re
-from typing import Any, Dict, List, Optional, Union
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from urllib.parse import quote
 
 import httpx
 
 from app.core.config.static import (
     CRM_MESSAGE_SEND_TIMEOUT_SECONDS,
+    META_APP_SECRET,
+    META_WEBHOOK_VERIFY_TOKEN,
     META_WHATSAPP_GRAPH_BASE_URL,
     META_WHATSAPP_GRAPH_VERSION,
 )
@@ -38,14 +53,24 @@ from app.crm.connectivity.reasons import (
     REASON_UNREADABLE,
 )
 from app.crm.connectivity.schemas import (
+    TOPIC_INBOUND,
+    TOPIC_STATUS,
     ChannelBinding,
     CredentialBundle,
+    InboundLetter,
     QueuedMessage,
     SendOutcome,
 )
 from app.crm.shared.redact import mask_address, mask_digit_runs
 
 TOKEN_KEY = "system_user_token"
+
+# Meta signs every callback with the APP secret over the raw request body.
+# Platform-level, not per-merchant, and that is forced rather than chosen: the
+# payload naming the merchant cannot be trusted until the signature is
+# verified, and verifying it needs the secret.
+SIGNATURE_HEADER = "x-hub-signature-256"
+_SIGNATURE_PREFIX = "sha256="
 
 # Meta's error codes, split by the only question an adapter may ask: could
 # the same request plausibly succeed later?
@@ -92,6 +117,15 @@ CREDENTIAL_CODES = {
     "200",  # permissions error
     "133010",  # phone number not registered for Cloud API
 }
+
+
+class WebhookSubscriptionError(RuntimeError):
+    """Meta refused to route a merchant's callbacks to us. Raised rather than
+    returning a flag: the caller is a request handler that must tell the
+    merchant it did not work, and a subscription that silently failed looks
+    exactly like a healthy account until somebody wonders why no events ever
+    arrive."""
+
 
 _NON_DIGITS = re.compile(r"\D")
 
@@ -152,6 +186,13 @@ def build_parameters(variables: Dict[str, Any]) -> Union[List[Dict[str, Any]], s
             return f"variable '{key}' is {type(value).__name__}, not text"
     positional = [key for key, _ in items if key.isascii() and key.isdigit()]
     if len(positional) == len(items):
+        # The keys must be exactly 1..N: Meta fills {{1}}..{{N}} from list
+        # ORDER, so a gap ({"1","3"}) or an off-origin key ({"2"} alone,
+        # {"0","1"}) silently shifts every later value one slot left in a
+        # customer's message — corruption that LOOKS delivered, like the
+        # bool case above. (Duplicates cannot happen: keys came from a dict.)
+        if sorted(int(key) for key in positional) != list(range(1, len(items) + 1)):
+            return "positional template variable keys must be exactly 1..N"
         # Sorting as strings would put "10" before "2" and silently swap two
         # values in a customer's message.
         ordered = sorted(items, key=lambda item: int(item[0]))
@@ -162,6 +203,116 @@ def build_parameters(variables: Dict[str, Any]) -> Union[List[Dict[str, Any]], s
         {"type": "text", "parameter_name": key, "text": str(value)}
         for key, value in items
     ]
+
+
+# ---------------------------------------------------------------------------
+# Inbound: Meta's callback shape
+#
+# Everything below is Meta-specific and exists nowhere else in the codebase.
+# A second provider signs differently and nests differently, and that is the
+# whole reason this lives behind the adapter interface.
+# ---------------------------------------------------------------------------
+
+
+def provider_timestamp(value: Any) -> Optional[datetime]:
+    """Meta's unix seconds -> an aware datetime, or None if unusable.
+
+    Their clock, not ours: when something happened is the provider's fact,
+    and when we heard about it is merely ours. Total, because a letter with a
+    broken timestamp is still worth filing.
+    """
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def envelope_values(body: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The payload objects inside one notification.
+
+    Meta wraps everything in entry[] / changes[] / value and batches freely:
+    one body may hold several entries, each with several changes, and they may
+    concern different merchants' numbers. Total, so a malformed entry cannot
+    discard a sibling that was perfectly good.
+    """
+    values: List[Dict[str, Any]] = []
+    entries = body.get("entry")
+    if not isinstance(entries, list):
+        return values
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if isinstance(value, dict):
+                values.append(value)
+    return values
+
+
+def receiving_number(value: Dict[str, Any]) -> str:
+    """Which of OUR numbers a notification concerns.
+
+    Meta names it as a phone_number_id in the metadata, and it is the only
+    thing in the body that can say whose customer this is — so a value
+    without one cannot be filed under any merchant.
+    """
+    metadata = value.get("metadata")
+    if isinstance(metadata, dict):
+        return str(metadata.get("phone_number_id") or "")
+    return ""
+
+
+def letters_in_value(value: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """One notification value -> (topic, external_id, payload) per item.
+
+    Two kinds ride the same notification and both are wanted:
+
+      · statuses[] — what became of a message WE sent. Meta sends one per
+        transition on the same message id, so the id alone would collapse
+        four letters into one; the external_id pairs it with the status.
+      · messages[] — what a customer sent US. Its own id is unique already.
+
+    The payload is the provider's object as it arrived, with one key added:
+    the notification's ``metadata``, copied verbatim, because it names the
+    receiving number and the item itself does not.
+    """
+    metadata = value.get("metadata")
+    letters: List[Tuple[str, str, Dict[str, Any]]] = []
+
+    statuses = value.get("statuses")
+    if isinstance(statuses, list):
+        for status in statuses:
+            if not isinstance(status, dict):
+                continue
+            message_id, state = status.get("id"), status.get("status")
+            if not message_id or not state:
+                continue
+            letters.append(
+                (
+                    TOPIC_STATUS,
+                    f"{message_id}:{state}",
+                    {**status, "metadata": metadata},
+                )
+            )
+
+    messages = value.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_id = message.get("id")
+            if not message_id:
+                continue
+            letters.append(
+                (TOPIC_INBOUND, str(message_id), {**message, "metadata": metadata})
+            )
+
+    return letters
 
 
 class MetaWhatsAppAdapter(ChannelAdapter):
@@ -353,3 +504,143 @@ class MetaWhatsAppAdapter(ChannelAdapter):
             str(code) if code is not None else None,
             str(error.get("message") or ""),
         )
+
+
+async def subscribe_to_webhooks(waba_id: str, access_token: str) -> None:
+    """Point a merchant's WABA at our app's callback URL.
+
+    ``POST /{waba_id}/subscribed_apps``. Configuring the callback URL in the
+    Meta app dashboard routes NOTHING on its own: until each WABA is
+    subscribed to the app, that merchant's delivery receipts and inbound
+    messages are simply never sent to us. This is the call that turns it on,
+    once per account.
+
+    Raises on failure rather than returning a flag: the caller is a request
+    handler that must tell the merchant it did not work, and a subscription
+    that silently failed looks exactly like a connected account until someone
+    wonders why no receipts ever arrive.
+
+    Signature matches the stub the Embedded Signup work (PR #1038) left for
+    this, so its onboarding sequence can call it unchanged once both land.
+    """
+    url = (
+        f"{META_WHATSAPP_GRAPH_BASE_URL.rstrip('/')}/"
+        f"{META_WHATSAPP_GRAPH_VERSION.strip('/')}/"
+        f"{quote(waba_id, safe='')}/subscribed_apps"
+    )
+    async with create_http_client(timeout=CRM_MESSAGE_SEND_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            url, headers={"Authorization": f"Bearer {access_token}"}
+        )
+    if not response.is_success:
+        code, detail = MetaWhatsAppAdapter.error_of(
+            MetaWhatsAppAdapter.json_body(response)
+        )
+        raise WebhookSubscriptionError(
+            f"Meta refused the webhook subscription for this account "
+            f"(http={response.status_code} code={code or 'none'}): {detail}"
+        )
+
+
+def verify_signature(raw_body: bytes, headers: Mapping[str, str]) -> bool:
+    """Whether this callback really came from Meta.
+
+    HMAC-SHA256 over the RAW bytes, keyed by the app secret. Meta cannot hold
+    a bearer token, so this IS the authentication for the callback route.
+
+    Fails closed on every uncertainty — no secret configured, no header, a
+    header in an unexpected shape. An endpoint that accepts unverifiable
+    bodies is one anyone can write events into.
+
+    Two details are load-bearing rather than stylistic: the MAC covers the raw
+    bytes BEFORE any parse (re-serialising changes whitespace and key order,
+    and the signature would never match again), and compare_digest is used
+    instead of == (string comparison returns early on the first wrong
+    character, and that timing difference is enough to let an attacker
+    discover a valid signature byte by byte).
+    """
+    if not META_APP_SECRET:
+        # Loud, because this is the difference between "authenticated" and
+        # "open to the internet", and the symptom otherwise is silence.
+        logger.error(
+            "whatsapp: no Meta app secret configured — refusing every inbound "
+            "webhook"
+        )
+        return False
+    # Header names are case-insensitive on the wire; a plain dict of them is
+    # not, so look the value up without assuming the sender's casing.
+    header = next(
+        (v for k, v in headers.items() if k.lower() == SIGNATURE_HEADER), None
+    )
+    if not header or not header.startswith(_SIGNATURE_PREFIX):
+        return False
+    expected = hmac.new(META_APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header[len(_SIGNATURE_PREFIX) :])
+
+
+def handshake_challenge(params: Mapping[str, str]) -> Optional[str]:
+    """Meta's subscription challenge, echoed back when the token matches.
+
+    Called once, when the callback URL is saved in the app dashboard, to prove
+    we own the endpoint. Same fail-closed posture and constant-time compare as
+    the signature: the verify token is a shared secret, and leaking it through
+    timing would let someone else claim our callback URL.
+    """
+    if not META_WEBHOOK_VERIFY_TOKEN:
+        logger.error(
+            "whatsapp: no webhook verify token configured — refusing the "
+            "subscription handshake"
+        )
+        return None
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if params.get("hub.mode") != "subscribe" or not token or challenge is None:
+        return None
+    if not hmac.compare_digest(token, META_WEBHOOK_VERIFY_TOKEN):
+        logger.warning("whatsapp: webhook handshake presented a wrong token")
+        return None
+    return challenge
+
+
+def read_notification(body: Dict[str, Any]) -> List[InboundLetter]:
+    """Meta's envelope -> letters, ready for the spine.
+
+    Total on purpose: a body this cannot read yields no letters rather than
+    raising. Meta is owed a 200 either way, and a malformed fragment must not
+    discard the good ones beside it.
+
+    A value with no receiving number yields nothing: template-status and
+    account-review notifications arrive on this same webhook, and they name no
+    endpoint to file them under.
+    """
+    letters: List[InboundLetter] = []
+    for value in envelope_values(body):
+        address = receiving_number(value)
+        if not address:
+            continue
+        for topic, external_id, payload in letters_in_value(value):
+            letters.append(
+                InboundLetter(
+                    address=address,
+                    topic=topic,
+                    external_id=external_id,
+                    payload=payload,
+                    occurred_at=provider_timestamp(payload.get("timestamp")),
+                )
+            )
+    return letters
+
+
+async def subscribe_account(waba_id: str, bundle: CredentialBundle) -> None:
+    """Subscribe one WABA using that account's own stored token.
+
+    Takes the bundle rather than a token so the key's name stays in this file:
+    which secret Meta wants is Meta's business, not the caller's.
+    """
+    token = require_secret(bundle, TOKEN_KEY, MetaWhatsAppAdapter.channel)
+    if token is None:
+        raise WebhookSubscriptionError(
+            "This account's access token is missing or unreadable. "
+            "Reconnect it first."
+        )
+    await subscribe_to_webhooks(waba_id, token)

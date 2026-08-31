@@ -18,7 +18,10 @@ from app.crm.connectivity.providers.whatsapp import (
     TERMINAL_CODES,
     MetaWhatsAppAdapter,
     build_parameters,
+    handshake_challenge,
+    read_notification,
     to_meta_recipient,
+    verify_signature,
 )
 from app.crm.connectivity.schemas import (
     ChannelBinding,
@@ -149,11 +152,30 @@ async def test_the_body_names_a_template_and_never_a_rendered_string(
 def test_numeric_keys_become_positional_parameters_in_numeric_order() -> None:
     """Numeric keys become positional parameters in numeric order."""
     # Sorting as strings would put "10" before "2" and silently swap two
-    # values in a customer's message.
-    params = build_parameters({"2": "second", "10": "tenth", "1": "first"})
+    # values in a customer's message. Ten keys, because the string-vs-int
+    # difference only shows once a two-digit key exists — and the keys must
+    # be contiguous 1..N to be sendable at all (see the tests below).
+    shuffled = {str(n): f"v{n}" for n in (2, 10, 1, 7, 4, 9, 3, 6, 8, 5)}
+    params = build_parameters(shuffled)
     assert isinstance(params, list)
-    assert [p["text"] for p in params] == ["first", "second", "tenth"]
+    assert [p["text"] for p in params] == [f"v{n}" for n in range(1, 11)]
     assert all("parameter_name" not in p for p in params)
+
+
+def test_non_contiguous_positional_keys_are_refused() -> None:
+    """Non-contiguous positional keys are refused."""
+    # Meta fills {{1}}..{{N}} from list ORDER, not from the keys — so a gap
+    # or an off-origin key silently shifts every later value one slot left
+    # in the customer's message. Corruption that LOOKS delivered; refusing
+    # is the only honest answer.
+    for variables in (
+        {"1": "a", "3": "c"},  # gap: "c" would render as {{2}}
+        {"0": "a", "1": "b"},  # zero-based: both values shift
+        {"2": "x"},  # single off-origin: "x" would render as {{1}}
+    ):
+        defect = build_parameters(variables)
+        assert isinstance(defect, str), variables
+        assert "1..N" in defect
 
 
 def test_named_keys_become_named_parameters() -> None:
@@ -539,3 +561,342 @@ async def test_a_control_character_address_does_not_escape_deliver(
     assert outcome.reason == "100"
     assert outcome.retryable is False
     assert "/PN%0A1/messages" in seen["url"]
+
+
+# ===========================================================================
+# Inbound: Meta's callback shape
+#
+# The door itself is tested in test_webhooks.py against a fake provider. What
+# is tested here is only what is Meta's — how they sign, how they challenge,
+# and how their envelope nests — because a second provider will do all three
+# differently.
+# ===========================================================================
+
+APP_SECRET = "meta-app-secret-for-tests"
+VERIFY_TOKEN = "meta-verify-token-for-tests"
+PHONE_NUMBER_ID = "812345678901234"
+OUT_WAMID = "wamid.OUTBOUND"
+IN_WAMID = "wamid.INBOUND"
+# 2026-08-31 12:00:00 UTC, as Meta sends it: unix seconds, as a string.
+WA_TS = "1788177600"
+
+
+@pytest.fixture
+def meta_secrets(monkeypatch):
+    """Both platform secrets present — the normal running state."""
+    monkeypatch.setattr(whatsapp_module, "META_APP_SECRET", APP_SECRET)
+    monkeypatch.setattr(whatsapp_module, "META_WEBHOOK_VERIFY_TOKEN", VERIFY_TOKEN)
+
+
+def _wa_signature(raw: bytes, secret: str = APP_SECRET) -> str:
+    """Sign the body the way Meta does."""
+    import hashlib
+    import hmac
+
+    return "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+
+
+def _wa_status(**overrides) -> dict:
+    """A Meta status object for notification payloads."""
+    fields = {"id": OUT_WAMID, "status": "delivered", "timestamp": WA_TS}
+    fields.update(overrides)
+    return fields
+
+
+def _wa_message(**overrides) -> dict:
+    """A Meta inbound message object for notification payloads."""
+    fields = {
+        "from": "919876543210",
+        "id": IN_WAMID,
+        "timestamp": WA_TS,
+        "type": "text",
+        "text": {"body": "yes, confirm it"},
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _wa_value(**overrides) -> dict:
+    """A Meta change-value envelope for notification payloads."""
+    fields = {"metadata": {"phone_number_id": PHONE_NUMBER_ID}}
+    fields.update(overrides)
+    return fields
+
+
+def _wa_body(*values) -> dict:
+    """A full Meta notification body around the given values."""
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [{"id": "waba-1", "changes": [{"value": v} for v in values]}],
+    }
+
+
+# --- their signature ---------------------------------------------------------
+
+
+def test_a_correct_signature_over_these_exact_bytes_passes(meta_secrets) -> None:
+    """A correct signature over these exact bytes passes."""
+    raw = b'{"entry":[]}'
+    adapter = MetaWhatsAppAdapter()
+    assert verify_signature(raw, {"X-Hub-Signature-256": _wa_signature(raw)})
+
+
+def test_the_signature_header_is_matched_whatever_its_casing(meta_secrets) -> None:
+    # Header names are case-insensitive on the wire, and a plain dict is not.
+    """The signature header is matched whatever its casing."""
+    raw = b'{"entry":[]}'
+    for header in ("x-hub-signature-256", "X-HUB-SIGNATURE-256"):
+        assert verify_signature(raw, {header: _wa_signature(raw)})
+
+
+def test_a_signature_for_different_bytes_is_refused(meta_secrets) -> None:
+    # The whole point: the MAC covers the body, so a real signature cannot be
+    # replayed onto a payload someone else wrote.
+    """A signature for different bytes is refused."""
+    raw = b'{"entry":[]}'
+    assert not verify_signature(
+        b'{"entry":[{"tampered":true}]}',
+        {"X-Hub-Signature-256": _wa_signature(raw)},
+    )
+
+
+def test_a_signature_from_a_different_secret_is_refused(meta_secrets) -> None:
+    """A signature from a different secret is refused."""
+    raw = b'{"entry":[]}'
+    assert not verify_signature(
+        raw, {"X-Hub-Signature-256": _wa_signature(raw, "not-our-secret")}
+    )
+
+
+@pytest.mark.parametrize(
+    "header", [None, "", "deadbeef", "sha1=deadbeef", "sha256=", "sha256=not-hex"]
+)
+def test_a_missing_or_misshapen_signature_is_refused(meta_secrets, header) -> None:
+    """A missing or misshapen signature is refused."""
+    headers = {} if header is None else {"X-Hub-Signature-256": header}
+    assert not verify_signature(b'{"entry":[]}', headers)
+
+
+def test_without_a_configured_secret_everything_is_refused(monkeypatch) -> None:
+    # Fail closed, and the loudest case in the file: an unauthenticated route
+    # with no way to verify anything must refuse ALL traffic, never accept it.
+    """Without a configured secret everything is refused."""
+    monkeypatch.setattr(whatsapp_module, "META_APP_SECRET", "")
+    raw = b'{"entry":[]}'
+    assert not verify_signature(raw, {"X-Hub-Signature-256": _wa_signature(raw)})
+
+
+# --- their handshake ---------------------------------------------------------
+
+
+def test_the_handshake_echoes_the_challenge_for_our_token(meta_secrets) -> None:
+    """The handshake echoes the challenge for our token."""
+    assert (
+        handshake_challenge(
+            {
+                "hub.mode": "subscribe",
+                "hub.verify_token": VERIFY_TOKEN,
+                "hub.challenge": "12345",
+            }
+        )
+        == "12345"
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"hub.mode": "subscribe", "hub.verify_token": "wrong", "hub.challenge": "1"},
+        {
+            "hub.mode": "unsubscribe",
+            "hub.verify_token": VERIFY_TOKEN,
+            "hub.challenge": "1",
+        },
+        {"hub.verify_token": VERIFY_TOKEN, "hub.challenge": "1"},
+        {"hub.mode": "subscribe", "hub.challenge": "1"},
+        {"hub.mode": "subscribe", "hub.verify_token": VERIFY_TOKEN},
+        {},
+    ],
+)
+def test_the_handshake_refuses_anything_else(meta_secrets, params) -> None:
+    """The handshake refuses anything else."""
+    assert handshake_challenge(params) is None
+
+
+def test_without_a_configured_token_no_handshake_succeeds(monkeypatch) -> None:
+    """Without a configured token no handshake succeeds."""
+    monkeypatch.setattr(whatsapp_module, "META_WEBHOOK_VERIFY_TOKEN", "")
+    assert (
+        handshake_challenge(
+            {"hub.mode": "subscribe", "hub.verify_token": "", "hub.challenge": "1"}
+        )
+        is None
+    )
+
+
+# --- their envelope ----------------------------------------------------------
+
+
+def test_a_status_becomes_one_letter_per_transition() -> None:
+    # Meta sends one webhook per transition on the SAME message id, so the id
+    # alone would collapse four letters into one and the journey would show
+    # only whichever arrived last.
+    """A status becomes one letter per transition."""
+    letters = read_notification(_wa_body(_wa_value(statuses=[_wa_status()])))
+    assert len(letters) == 1
+    assert letters[0].topic == "message.status"
+    assert letters[0].external_id == f"{OUT_WAMID}:delivered"
+    assert letters[0].address == PHONE_NUMBER_ID
+    assert letters[0].occurred_at == datetime.fromtimestamp(int(WA_TS), tz=timezone.utc)
+
+
+def test_each_transition_of_one_message_files_separately() -> None:
+    """Each transition of one message files separately."""
+    ids = [
+        read_notification(_wa_body(_wa_value(statuses=[_wa_status(status=s)])))[
+            0
+        ].external_id
+        for s in ("sent", "delivered", "read")
+    ]
+    assert ids == [
+        f"{OUT_WAMID}:sent",
+        f"{OUT_WAMID}:delivered",
+        f"{OUT_WAMID}:read",
+    ]
+
+
+def test_an_inbound_message_is_keyed_by_its_own_id() -> None:
+    """An inbound message is keyed by its own id."""
+    letters = read_notification(_wa_body(_wa_value(messages=[_wa_message()])))
+    assert letters[0].topic == "message.inbound"
+    assert letters[0].external_id == IN_WAMID
+    assert letters[0].payload["text"] == {"body": "yes, confirm it"}
+
+
+def test_both_kinds_ride_one_notification() -> None:
+    # Receipts and replies routinely share an envelope; dropping either half
+    # would lose real events with no error anywhere.
+    """Both kinds ride one notification."""
+    letters = read_notification(
+        _wa_body(_wa_value(statuses=[_wa_status()], messages=[_wa_message()]))
+    )
+    assert [letter.topic for letter in letters] == [
+        "message.status",
+        "message.inbound",
+    ]
+
+
+def test_every_letter_carries_the_receiving_number() -> None:
+    # The item itself never names which of OUR numbers it arrived on, and a
+    # consumer needs that to find the binding.
+    """Every letter carries the receiving number."""
+    letters = read_notification(
+        _wa_body(_wa_value(statuses=[_wa_status()], messages=[_wa_message()]))
+    )
+    for letter in letters:
+        assert letter.payload["metadata"] == {"phone_number_id": PHONE_NUMBER_ID}
+
+
+def test_the_payload_is_metas_object_not_our_reading_of_it() -> None:
+    # Canon: raw, always. A consumer must see what Meta sent, including the
+    # fields this module has no opinion about.
+    """The payload is metas object not our reading of it."""
+    raw = _wa_status(pricing={"billable": True, "category": "utility"}, extra="kept")
+    letter = read_notification(_wa_body(_wa_value(statuses=[raw])))[0]
+    assert letter.payload["pricing"] == {"billable": True, "category": "utility"}
+    assert letter.payload["extra"] == "kept"
+
+
+def test_a_reply_keeps_the_message_it_quotes() -> None:
+    # context.id is the "replied to" link a consumer joins on.
+    """A reply keeps the message it quotes."""
+    letter = read_notification(
+        _wa_body(_wa_value(messages=[_wa_message(context={"id": OUT_WAMID})]))
+    )[0]
+    assert letter.payload["context"]["id"] == OUT_WAMID
+
+
+def test_several_entries_and_changes_are_all_found() -> None:
+    # Meta batches freely, and they may concern different merchants' numbers.
+    """Several entries and changes are all found."""
+    body = {
+        "entry": [
+            {
+                "changes": [
+                    {"value": _wa_value(statuses=[_wa_status()])},
+                    {"value": _wa_value(messages=[_wa_message()])},
+                ]
+            },
+            {
+                "changes": [
+                    {
+                        "value": _wa_value(
+                            metadata={"phone_number_id": "999"},
+                            statuses=[_wa_status(id="w2")],
+                        )
+                    }
+                ]
+            },
+        ]
+    }
+    letters = read_notification(body)
+    assert len(letters) == 3
+    assert {letter.address for letter in letters} == {PHONE_NUMBER_ID, "999"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"entry": None},
+        {"entry": "nope"},
+        {"entry": [None, "x", 42]},
+        {"entry": [{"changes": None}]},
+        {"entry": [{"changes": [None, {"value": "not a dict"}]}]},
+        # A value with no metadata names no endpoint to file it under —
+        # template-status notifications arrive on this same webhook.
+        {
+            "entry": [
+                {"changes": [{"value": {"statuses": [{"id": "x", "status": "y"}]}}]}
+            ]
+        },
+    ],
+)
+def test_an_unreadable_envelope_yields_nothing_and_raises_nothing(body) -> None:
+    """An unreadable envelope yields nothing and raises nothing."""
+    assert read_notification(body) == []
+
+
+def test_a_malformed_entry_does_not_hide_a_good_one() -> None:
+    """A malformed entry does not hide a good one."""
+    body = {
+        "entry": [None, {"changes": [{"value": _wa_value(statuses=[_wa_status()])}]}]
+    }
+    assert len(read_notification(body)) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"statuses": [{"id": OUT_WAMID}]},  # no status
+        {"statuses": [{"status": "read"}]},  # no id
+        {"statuses": ["not a dict"]},
+        {"messages": [{"from": "91"}]},  # no id
+        {"messages": [None]},
+        {"statuses": "nope", "messages": 42},
+    ],
+)
+def test_unusable_items_are_skipped_rather_than_filed(value) -> None:
+    """Unusable items are skipped rather than filed."""
+    body = _wa_body(_wa_value(**value))
+    assert read_notification(body) == []
+
+
+@pytest.mark.parametrize("bad", [None, "", "not-a-number", {}, [], "9" * 30])
+def test_an_unusable_timestamp_never_raises(bad) -> None:
+    # A letter with a broken clock is still worth filing.
+    """An unusable timestamp never raises."""
+    letter = read_notification(
+        _wa_body(_wa_value(statuses=[_wa_status(timestamp=bad)]))
+    )[0]
+    assert letter.occurred_at is None
