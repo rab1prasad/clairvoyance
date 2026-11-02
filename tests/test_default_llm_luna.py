@@ -51,7 +51,7 @@ def keys(monkeypatch):
 
 
 def _bedrock_key(svc: AWSBedrockLLMService) -> str:
-    provider = svc._aws_session._session.get_component("token_provider")
+    provider = svc._aws_session.get_component("token_provider")
     return provider.load_token(signing_name="bedrock").token
 
 

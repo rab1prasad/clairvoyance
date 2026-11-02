@@ -250,7 +250,7 @@ class PhononSTTService(WebsocketSTTService):
 
     async def stop(self, frame: EndFrame):
         """Ask Phonon for the finals already owed, wait briefly, then close."""
-        await super().stop(frame)
+        # Before super().stop(): from pipecat 1.14 it closes the socket.
         if self._websocket is not None and self._websocket.state is State.OPEN:
             self._closing = True
             if self._user_speaking and self._has_unfinalized_audio():
@@ -266,6 +266,7 @@ class PhononSTTService(WebsocketSTTService):
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"{self}: Phonon did not close after CloseStream")
+        await super().stop(frame)
         await self._disconnect()
 
     async def cancel(self, frame: CancelFrame):

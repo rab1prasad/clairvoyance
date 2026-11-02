@@ -283,5 +283,5 @@ def test_a_providerless_llm_block_is_checked_and_run_on_its_bedrock_row(
         )
     )
     assert isinstance(svc, AWSBedrockLLMService)
-    token = svc._aws_session._session.get_component("token_provider")
+    token = svc._aws_session.get_component("token_provider")
     assert token.load_token(signing_name="bedrock").token == "br"

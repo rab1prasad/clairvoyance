@@ -595,6 +595,8 @@ def test_template_rejects_unknown_model():
 def aic_ready(monkeypatch, tmp_path, provisioned):
     """An AIC license key and every quail artifact present."""
     monkeypatch.setattr(noise_filter.static, "BREEZE_BUDDY_AIC_LICENSE_KEY", "key")
+    # The artifacts below are placeholders, not loadable model files.
+    monkeypatch.setattr(noise_filter, "_aic_model_error", lambda path: None)
     for attr in (
         "AIC_MODEL_PATH",
         "AIC_MODEL_PATH_16KHZ",

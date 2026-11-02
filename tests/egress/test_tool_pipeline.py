@@ -7,7 +7,6 @@ wiring (tool_response_schemas projection + isError gating)."""
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 
 import pytest
 from mcp.client.session_group import StreamableHttpParameters
@@ -245,7 +244,7 @@ class _FakeAsyncClient:
 
 def _server_params():
     return StreamableHttpParameters(
-        url="https://mcp.example.com/mcp", headers={}, timeout=timedelta(seconds=5)
+        url="https://mcp.example.com/mcp", headers={}, timeout=5
     )
 
 
