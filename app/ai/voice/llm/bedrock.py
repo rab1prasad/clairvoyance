@@ -15,9 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cache
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
-import aioboto3
 from aiobotocore.session import AioSession
 from botocore.config import Config
 from botocore.tokens import ScopedEnvTokenProvider
@@ -97,34 +96,36 @@ def build_bedrock_llm(config: BedrockConfig) -> AWSBedrockLLMService:
         # pipecat 1.1.0 builds the session and client config in __init__ with
         # no hook to supply them; re-verify on upgrade.
         service._aws_session = _api_key_session(config.api_key)
-        service._aws_params["config"] = service._aws_params["config"].merge(
-            Config(signature_version="bearer")
-        )
+        service._aws_params["config"] = cast(
+            Config, service._aws_params["config"]
+        ).merge(Config(signature_version="bearer"))
     else:
         service._aws_session = _default_chain_session()
     return service
 
 
 @cache
-def _default_chain_session() -> aioboto3.Session:
+def _default_chain_session() -> AioSession:
     """The process's one session for the default credential chain.
 
     botocore caches resolved credentials on the session, so pipecat's
-    per-service ``aioboto3.Session()`` would re-resolve them on every call's
-    first turn — under OIDC (``AWS_ROLE_ARN`` + ``AWS_WEB_IDENTITY_TOKEN_FILE``)
-    an STS ``AssumeRoleWithWebIdentity`` round trip ahead of the first reply.
-    Shared, they resolve once and refresh themselves before expiry.
+    per-service session (``aiobotocore.session.get_session()``) would
+    re-resolve them on every call's first turn — under OIDC (``AWS_ROLE_ARN``
+    + ``AWS_WEB_IDENTITY_TOKEN_FILE``) an STS ``AssumeRoleWithWebIdentity``
+    round trip ahead of the first reply. Shared, they resolve once and
+    refresh themselves before expiry. pipecat creates a client per request
+    from the session, so sharing it is safe.
     """
-    return aioboto3.Session()
+    return AioSession()
 
 
-def _api_key_session(api_key: str) -> aioboto3.Session:
+def _api_key_session(api_key: str) -> AioSession:
     session = AioSession()
     session.register_component(
         "token_provider",
         ScopedEnvTokenProvider(session, environ={_BEARER_TOKEN_ENV: api_key}),
     )
-    return aioboto3.Session(botocore_session=session)
+    return session
 
 
 class _StreamClosingBedrockLLMService(AWSBedrockLLMService):

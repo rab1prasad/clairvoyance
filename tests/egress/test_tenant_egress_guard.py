@@ -10,11 +10,11 @@ from __future__ import annotations
 import asyncio
 import socket
 import time
-from datetime import timedelta
 from typing import Any, Dict, List
 
 import aiohttp
 import httpx
+import httpx2
 import pytest
 from mcp.client.session_group import StreamableHttpParameters
 
@@ -168,7 +168,7 @@ def _mcp_handler(monkeypatch):
     params = StreamableHttpParameters(
         url="https://shop.example.com/ai/mcp",
         headers={},
-        timeout=timedelta(seconds=5),
+        timeout=5,
     )
     return mcp_mod._create_direct_http_tool_handler(params, "get_order")
 
@@ -567,11 +567,11 @@ async def test_pipecat_hands_the_guarded_client_to_the_mcp_library(monkeypatch):
 
     received: Dict[str, Any] = {}
 
-    def capture(**kwargs):
+    def capture(url, **kwargs):
         received.update(kwargs)
         raise RuntimeError("stop before any network")
 
-    monkeypatch.setattr(pipecat_mcp, "streamablehttp_client", capture)
+    monkeypatch.setattr(mcp_egress, "streamable_http_client", capture)
     params = mcp_mod._build_server_params(
         McpServerConfig(url="https://shop.example.com/ai/mcp"), {}
     )
@@ -579,7 +579,26 @@ async def test_pipecat_hands_the_guarded_client_to_the_mcp_library(monkeypatch):
     with pytest.raises(RuntimeError, match="stop before any network"):
         await pipecat_mcp.MCPClient(server_params=params).start()
 
-    assert received["httpx_client_factory"] is mcp_egress._egress_safe_client
+    assert isinstance(
+        received["http_client"]._transport, mcp_egress.McpSdkEgressTransport
+    )
+
+
+async def test_the_mcp_librarys_own_requests_go_to_the_checked_ip(monkeypatch):
+    _dns(monkeypatch, {"shop.example.com": PUBLIC})
+    seen: List[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200)
+
+    transport = mcp_egress.McpSdkEgressTransport()
+    monkeypatch.setattr(transport, "_inner", httpx2.MockTransport(handler))
+    async with httpx2.AsyncClient(transport=transport) as client:
+        await client.post("https://shop.example.com/ai/mcp")
+
+    assert str(seen[0].url) == f"https://{PUBLIC}/ai/mcp"
+    assert seen[0].extensions["sni_hostname"] == "shop.example.com"
 
 
 async def test_mcp_direct_call_stalled_lookup_stays_within_the_budget(monkeypatch):
@@ -590,9 +609,7 @@ async def test_mcp_direct_call_stalled_lookup_stays_within_the_budget(monkeypatc
     monkeypatch.setattr(mcp_mod, "_check_mcp_egress", stalled)
     _FakeClient.made, _FakeClient.posts = [], []
     monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", _FakeClient)
-    params = StreamableHttpParameters(
-        url="https://shop.example.com/ai/mcp", timeout=timedelta(seconds=1)
-    )
+    params = StreamableHttpParameters(url="https://shop.example.com/ai/mcp", timeout=1)
     handler = mcp_mod._create_direct_http_tool_handler(params, "get_order")
     started = time.monotonic()
 
