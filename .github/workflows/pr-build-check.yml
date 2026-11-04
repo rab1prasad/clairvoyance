@@ -7,6 +7,7 @@ on:
       - release
       - crm
       - assist
+      - voice
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
