@@ -18,7 +18,7 @@ claims — not by trying one and falling back:
 
 | Caller | Token | How it's checked |
 | ------ | ----- | ---------------- |
-| **Relay** — one service pushing for many merchants (e.g. the Shopify relay) | A wildcard-scoped RBAC JWT (`merchant_ids: ["*"]`, or an admin token). The same credential the lead API already takes. | Signature + expiry only. No per-merchant provisioning, no DB lookup. |
+| **Relay** — one service pushing for many merchants (e.g. the Shopify relay) | A wildcard-scoped RBAC JWT, or an admin token. `"*"` on both `reseller_ids` and `merchant_ids` covers every merchant; `merchant_ids: ["*"]` with named `reseller_ids` covers only those resellers' merchants. The same credential the lead API already takes. | Signature + expiry, then the merchant must exist and be inside the token's scope (its reseller is read from the merchant row). No per-merchant provisioning. |
 | **Single merchant** — one integration, one tenant (e.g. the WooCommerce plugin) | The per-merchant JWT stored in `merchants.s2s_token`. | Compared constant-time against the stored value, then verified. Rotating the row revokes the old token on the next call. |
 
 Both token kinds are JWTs signed by the same key, so a valid signature
@@ -28,7 +28,8 @@ which is why a narrowly-scoped token must always clear the stored value.
 
 Failures: no token, bad signature, expired, or not the merchant's
 current stored token → **401**. Narrowly-scoped token for a merchant
-with nothing provisioned → **404**.
+with nothing provisioned → **404**. Relay token for a merchant that does
+not exist or is outside the token's scope → **404**.
 
 ## Request
 
@@ -128,7 +129,7 @@ Every other **scalar** key (≤256 chars) rides into the template's
 | 200    | `{"id": null, "duplicate": true}` | Already stored under `(merchant_id, source, external_id)` — success, not an error |
 | 200    | `{"id": null, "duplicate": false, "archived": true}` | Parked during a planned database outage — accepted, not yet checked. It is replayed through this same door afterwards and checked then like any push: a valid event is stored (deduped), an invalid or unauthorised one is refused at replay and reported back to you |
 | 401    | —                                 | No token, or invalid/expired/superseded                          |
-| 404    | —                                 | No per-merchant token provisioned for this merchant              |
+| 404    | —                                 | No per-merchant token provisioned for this merchant, or (relay token) the merchant is unknown or outside the token's scope |
 | 413    | —                                 | Event larger than 1 MB — split it; one event per fact          |
 | 422    | —                                 | Envelope invalid — blank or whitespace-only fields, non-object payload, or an unknown field |
 | 503    | —                                 | Store failed — retry with the SAME `external_id` (dedupe makes it safe) |

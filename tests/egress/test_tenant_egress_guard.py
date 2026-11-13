@@ -394,7 +394,17 @@ async def test_http_function_retries_a_dns_failure(monkeypatch):
 _WEBHOOK = "https://hooks.example.com/outcome"
 
 
-async def test_webhook_to_internal_target_is_refused_once(monkeypatch):
+@pytest.fixture
+def signing_key(monkeypatch):
+    """A reporting webhook is only sent signed, so the sender needs a key."""
+    monkeypatch.setattr(
+        "app.ai.voice.agents.breeze_buddy.utils.common"
+        ".ORDER_CONFIRMATION_WEBHOOK_SECRET_KEY",
+        "webhook-signing-secret",
+    )
+
+
+async def test_webhook_to_internal_target_is_refused_once(monkeypatch, signing_key):
     asked = _dns(monkeypatch, {"hooks.example.com": "169.254.169.254"})
     session = _Session([])
 
@@ -403,7 +413,9 @@ async def test_webhook_to_internal_target_is_refused_once(monkeypatch):
     assert asked == ["hooks.example.com"]  # a refusal is not retried
 
 
-async def test_webhook_does_not_follow_a_redirect_to_another_host(monkeypatch):
+async def test_webhook_does_not_follow_a_redirect_to_another_host(
+    monkeypatch, signing_key
+):
     _dns(monkeypatch, {"hooks.example.com": PUBLIC})
     session = _Session([_Response(307, "https://elsewhere.example/x")])
 
@@ -411,14 +423,14 @@ async def test_webhook_does_not_follow_a_redirect_to_another_host(monkeypatch):
     assert len(session.calls) == 1
 
 
-async def test_webhook_retries_a_dns_failure(monkeypatch):
+async def test_webhook_retries_a_dns_failure(monkeypatch, signing_key):
     asked = _dns_down(monkeypatch)
 
     assert await send_webhook_with_retry(_Session([]), _WEBHOOK, {"a": 1}) is False
     assert len(asked) == 3
 
 
-async def test_webhook_is_delivered_to_the_checked_ip(monkeypatch):
+async def test_webhook_is_delivered_to_the_checked_ip(monkeypatch, signing_key):
     _dns(monkeypatch, {"hooks.example.com": PUBLIC})
     session = _Session([_Response()])
 

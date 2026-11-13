@@ -54,7 +54,10 @@ Paths below carry no `crm` segment on purpose: the CRM routers mount at the app 
    words never see them.
 6. **Auth in hand:** an admin JWT for the `/workflows` routes; the
    relay's wildcard RBAC JWT (Nautilus's `CLAIRVOYANCE_JWT_TOKEN`) or the
-   merchant's `s2s_token` for the ingest door.
+   merchant's `s2s_token` for the ingest door. The relay token's scope
+   has to cover this merchant: `"*"` on both `reseller_ids` and
+   `merchant_ids`, or `merchant_ids: ["*"]` with the merchant's reseller
+   in `reseller_ids`; otherwise the door answers 404.
 7. **The goal key is `cart_token`.** Shopify's checkout and order bodies
    both carry it. On the first real payload confirm it is present; if the
    relay ever strips it, switch both `key.event` and `key.run` to `token`.
