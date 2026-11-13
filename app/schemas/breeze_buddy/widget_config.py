@@ -16,6 +16,9 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
+#: Largest value a Postgres ``integer`` column holds (the widget limit columns).
+PG_INTEGER_MAX = 2_147_483_647
+
 
 class WidgetAppearance(BaseModel):
     """Display-only widget appearance, stored verbatim on the row.
@@ -92,10 +95,13 @@ class WidgetConfigCreate(BaseModel):
         description="Exact-match list of allowed Origin / Referer values. "
         "Empty list means deny all (widget cannot be used until populated).",
     )
-    max_sessions_per_ip_hour: int = Field(60, ge=0)
-    max_messages_per_ip_hour: int = Field(600, ge=0)
-    max_concurrent_per_ip: int = Field(4, ge=0)
-    max_voice_sessions_per_ip_hour: int = Field(10, ge=0)
+    # The hourly limits go to check_rate_limit, where 0 means "limit off"
+    # (an ops switch). A widget's own limit can never be off, so 1 is the least.
+    # The columns are Postgres integers: a larger value fails the write (500).
+    max_sessions_per_ip_hour: int = Field(60, ge=1, le=PG_INTEGER_MAX)
+    max_messages_per_ip_hour: int = Field(600, ge=1, le=PG_INTEGER_MAX)
+    max_concurrent_per_ip: int = Field(4, ge=0, le=PG_INTEGER_MAX)
+    max_voice_sessions_per_ip_hour: int = Field(10, ge=1, le=PG_INTEGER_MAX)
     active: bool = Field(True, description="Inactive rows behave like 404.")
     appearance: Optional[WidgetAppearance] = Field(
         None, description="Display-only widget appearance; omitted = defaults."
@@ -111,10 +117,12 @@ class WidgetConfigUpdate(BaseModel):
 
     template_id: Optional[str] = None
     allowed_origins: Optional[List[str]] = None
-    max_sessions_per_ip_hour: Optional[int] = Field(None, ge=0)
-    max_messages_per_ip_hour: Optional[int] = Field(None, ge=0)
-    max_concurrent_per_ip: Optional[int] = Field(None, ge=0)
-    max_voice_sessions_per_ip_hour: Optional[int] = Field(None, ge=0)
+    # Bounds as in WidgetConfigCreate: 0 would switch the limit off, and the
+    # columns are Postgres integers.
+    max_sessions_per_ip_hour: Optional[int] = Field(None, ge=1, le=PG_INTEGER_MAX)
+    max_messages_per_ip_hour: Optional[int] = Field(None, ge=1, le=PG_INTEGER_MAX)
+    max_concurrent_per_ip: Optional[int] = Field(None, ge=0, le=PG_INTEGER_MAX)
+    max_voice_sessions_per_ip_hour: Optional[int] = Field(None, ge=1, le=PG_INTEGER_MAX)
     active: Optional[bool] = None
     appearance: Optional[WidgetAppearance] = Field(
         None,

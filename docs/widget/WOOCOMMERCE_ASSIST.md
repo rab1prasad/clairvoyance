@@ -328,15 +328,16 @@ Add an order-tracking section to the system prompt, for example:
 
 The same URL can be served over HTTP to other clients, with one JSON-RPC
 `tools/call` POST per tool call. The route is off unless
-`MCP_PUBLIC_ENDPOINT_ENABLED=true`, because it has no caller auth yet.
-Do not turn it on before auth is added to `app/api/routers/mcp.py`.
+`MCP_PUBLIC_ENDPOINT_ENABLED=true`.
 
-When it is on, it has no caller check: any store host, no merchant check,
-capped at 600 calls a minute per store. It serves `tools/call` only (no
+When it is on, the caller must be a logged-in admin (RBAC bearer token):
+401 without a login, 403 for any other role. It takes any store host, with
+no merchant check, capped at 600 calls a minute per store. It serves `tools/call` only (no
 `initialize` or `tools/list`; the tool schemas are in the template).
 
 ```bash
 curl -s https://api.breezebuddy.ai/mcp/woocommerce/<host> \
+  -H 'Authorization: Bearer <admin JWT>' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"search_catalog","arguments":{"catalog":{"query":"mouse","pagination":{"limit":2}}}}}'
 ```

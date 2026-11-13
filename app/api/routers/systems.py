@@ -2,7 +2,9 @@
 System Health Check Router
 
 Endpoints for monitoring system health including Redis connectivity.
-Responses carry the error type only; the error text goes to the logs.
+Responses carry at most the error type; the error text goes to the logs.
+/health/database and /health/redis are public and carry neither, and
+/health/redis names no Redis node.
 """
 
 import time
@@ -35,6 +37,10 @@ router = APIRouter()
 async def redis_health_check():
     """
     Redis health check - tests PING, SET, GET, DELETE operations.
+
+    Public route: it says which check failed, not why. The error type tells an
+    anonymous caller WHAT is failing, and node hosts and ports map the
+    cluster, so both go to the logs only.
     """
     health_status = {
         "status": "healthy",
@@ -61,12 +67,9 @@ async def redis_health_check():
                 "status": "ok",
                 "latency_ms": round((time.time() - start) * 1000, 2),
             }
-        except Exception as e:
+        except Exception:
             health_status["status"] = "unhealthy"
-            health_status["checks"]["ping"] = {
-                "status": "failed",
-                "error_type": type(e).__name__,
-            }
+            health_status["checks"]["ping"] = {"status": "failed"}
             raise
 
         # Check 2: SET
@@ -77,12 +80,9 @@ async def redis_health_check():
                 "status": "ok",
                 "latency_ms": round((time.time() - start) * 1000, 2),
             }
-        except Exception as e:
+        except Exception:
             health_status["status"] = "unhealthy"
-            health_status["checks"]["set"] = {
-                "status": "failed",
-                "error_type": type(e).__name__,
-            }
+            health_status["checks"]["set"] = {"status": "failed"}
             raise
 
         # Check 3: GET
@@ -106,12 +106,9 @@ async def redis_health_check():
                     "expected": test_value,
                     "actual": retrieved_value,
                 }
-        except Exception as e:
+        except Exception:
             health_status["status"] = "unhealthy"
-            health_status["checks"]["get"] = {
-                "status": "failed",
-                "error_type": type(e).__name__,
-            }
+            health_status["checks"]["get"] = {"status": "failed"}
             raise
 
         # Check 4: DELETE
@@ -124,12 +121,9 @@ async def redis_health_check():
                 "keys_deleted": deleted_count,
             }
         except Exception as e:
-            logger.error(f"Redis health check DELETE failed: {e}")
+            logger.error(f"Redis health check DELETE failed: {type(e).__name__}: {e}")
             health_status["status"] = "unhealthy"
-            health_status["checks"]["delete"] = {
-                "status": "failed",
-                "error_type": type(e).__name__,
-            }
+            health_status["checks"]["delete"] = {"status": "failed"}
 
         # Check 5: Cluster Info
         if hasattr(client, "get_nodes"):
@@ -138,25 +132,12 @@ async def redis_health_check():
                 health_status["cluster_info"] = {
                     "mode": "cluster",
                     "node_count": len(nodes),
-                    "nodes": [
-                        {
-                            "host": node.host,
-                            "port": node.port,
-                            "name": (
-                                node.name
-                                if hasattr(node, "name")
-                                else f"{node.host}:{node.port}"
-                            ),
-                        }
-                        for node in nodes
-                    ],
                 }
             except Exception as e:
-                logger.error(f"Redis health check cluster info failed: {e}")
-                health_status["cluster_info"] = {
-                    "mode": "cluster",
-                    "error_type": type(e).__name__,
-                }
+                logger.error(
+                    f"Redis health check cluster info failed: {type(e).__name__}: {e}"
+                )
+                health_status["cluster_info"] = {"mode": "cluster"}
         else:
             health_status["cluster_info"] = {"mode": "single-node"}
 
@@ -164,9 +145,8 @@ async def redis_health_check():
         return JSONResponse(status_code=status_code, content=health_status)
 
     except Exception as e:
-        logger.error(f"Redis health check failed: {e}")
+        logger.error(f"Redis health check failed: {type(e).__name__}: {e}")
         health_status["status"] = "unhealthy"
-        health_status["error_type"] = type(e).__name__
         return JSONResponse(status_code=503, content=health_status)
 
 
@@ -202,14 +182,16 @@ async def database_health_check():
                     },
                 )
     except Exception as e:
-        logger.error(f"Database health check failed: {e}")
+        # Public route: it answers healthy or not. The error type tells an
+        # anonymous caller WHAT is failing (auth, DNS, pool), so it is logged,
+        # not returned.
+        logger.error(f"Database health check failed: {type(e).__name__}: {e}")
         return JSONResponse(
             status_code=400,
             content={
                 "status": "unhealthy",
                 "database": "disconnected",
                 "message": "Database connection failed",
-                "error_type": type(e).__name__,
             },
         )
 
