@@ -4,6 +4,9 @@ The ONLY file other modules and buddy callers (the /uap routes, the voice
 tool) may import from app/crm/preview/uap (PREVIEW: logic not final).
 """
 
+# The CRM doors' tenant rule (app/crm/auth.py), for the /uap routes: buddy
+# code may import only a module's contracts, so this is their way to it.
+from app.crm.auth import _scope_covers_merchant as scope_covers_merchant
 from app.crm.preview.uap.db.accessor import (
     get_by_agent_id,
     get_by_agent_obj_ref,
@@ -44,5 +47,6 @@ __all__ = [
     "pick_action",
     "plan_patch",
     "remaining",
+    "scope_covers_merchant",
     "set_status",
 ]

@@ -18,17 +18,22 @@ CORS preflight is a separate concern — see ``options_cors_response``
 below. The browser's preflight must succeed for *any* origin so the
 request can reach our handler; only then can the per-merchant origin
 allowlist run. The two layers (CORS = transport, allowlist =
-application) are intentionally split.
+application) are intentionally split. The allowlist feeds the transport
+layer all the same: the origin it validates is the one the CORS answer
+names (``app/core/middleware/widget_cors_bypass.py``).
 """
 
 from __future__ import annotations
 
 from typing import Optional
-from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request, Response, status
 
 from app.core.logger import logger
+from app.core.middleware.widget_cors_bypass import (
+    caller_origin,
+    remember_validated_origin,
+)
 from app.database.accessor.breeze_buddy.widget_config import (
     get_widget_config_by_id,
     get_widget_config_by_public_key,
@@ -71,30 +76,9 @@ def client_ip(request: Request) -> str:
     return "unknown"
 
 
-def _origin_from_referer(referer: Optional[str]) -> Optional[str]:
-    """Strip a Referer URL down to ``scheme://host[:port]`` for allowlist
-    comparison. Returns None when the header is missing or unparseable.
-    """
-    if not referer:
-        return None
-    try:
-        parsed = urlparse(referer)
-    except Exception:
-        return None
-    if not parsed.scheme or not parsed.netloc:
-        return None
-    return f"{parsed.scheme}://{parsed.netloc}"
-
-
 def _caller_origin(request: Request) -> Optional[str]:
-    """Pick the caller's origin: ``Origin`` header wins; ``Referer`` is a
-    fallback for the rare cases where a browser strips Origin (legacy
-    cross-origin GETs, some privacy proxies).
-    """
-    origin = request.headers.get("origin")
-    if origin:
-        return origin.strip() or None
-    return _origin_from_referer(request.headers.get("referer"))
+    """The caller's origin, read the same way the CORS layer reads it."""
+    return caller_origin(request.headers)
 
 
 async def _enforce_widget_ip_limit(
@@ -167,6 +151,9 @@ def enforce_widget_origin(*, request: Request, cfg: WidgetConfigResponse) -> Non
     (``POST /widget-config/{id}/preview/session``), never through here. An
     Origin header proves nothing — any non-browser client can set it
     (N-WID-3).
+
+    An origin that passes is recorded on the request: the CORS answer then
+    names that origin, and session create binds the widget token to it.
     """
     origin = _caller_origin(request)
     if origin is None:
@@ -183,6 +170,7 @@ def enforce_widget_origin(*, request: Request, cfg: WidgetConfigResponse) -> Non
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Origin not permitted for this widget",
         )
+    remember_validated_origin(request, origin)
 
 
 async def resolve_widget_config_for_request(
@@ -268,15 +256,14 @@ async def enforce_widget_ip_limit(
 # CORS preflight
 # ---------------------------------------------------------------------------
 
-# Permissive CORS headers for widget routes. The browser must be able to
-# issue the preflight from any merchant origin so the request reaches our
+# Preflight headers for widget routes. The browser must be able to issue
+# the preflight from any merchant origin so the request reaches our
 # handler — the *application-layer* allowlist (``allowed_origins`` above)
-# is what gates production traffic. Credentials are intentionally not
-# enabled: widget tokens travel in ``Authorization``, and
-# ``Access-Control-Allow-Credentials: true`` combined with ``Origin: *``
-# is invalid per spec.
+# is what gates production traffic. ``Access-Control-Allow-Origin`` is not
+# set here: the CORS middleware is its only writer on widget paths, and it
+# names the caller's own origin, never ``*``. Credentials are intentionally
+# not enabled: widget tokens travel in ``Authorization``.
 _CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
     # GET is needed for the session-resume endpoint
     # (`GET /widget/session/{id}`). Browser-side preflight blocks any
     # method not listed here when the request carries Authorization.
@@ -289,11 +276,13 @@ _CORS_HEADERS = {
 
 
 def options_cors_response() -> Response:
-    """204 response with permissive CORS headers for OPTIONS preflight.
+    """204 response with the preflight headers for OPTIONS.
 
     Mount an OPTIONS handler on each widget router that returns this so
-    the browser preflight succeeds for any origin. The actual per-
-    merchant allowlist runs inside the corresponding POST handler.
+    the browser preflight succeeds for any origin (the CORS middleware
+    adds ``Access-Control-Allow-Origin`` with the caller's origin). The
+    actual per-merchant allowlist runs inside the corresponding POST
+    handler.
     """
     return Response(status_code=status.HTTP_204_NO_CONTENT, headers=_CORS_HEADERS)
 

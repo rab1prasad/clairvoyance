@@ -228,7 +228,10 @@ def test_probe_limit_runs_before_any_db_lookup(
 def test_preflight_is_open(client: TestClient) -> None:
     response = client.options("/widget/storefront-config")
     assert response.status_code == 204
-    assert response.headers["access-control-allow-origin"] == "*"
+    # The route no longer answers "*": the CORS middleware (not mounted on
+    # this bare app) adds the header, naming the caller's own origin. See
+    # tests/test_widget_cors_origin.py.
+    assert "access-control-allow-origin" not in response.headers
     assert "if-none-match" in response.headers["access-control-allow-headers"]
 
 

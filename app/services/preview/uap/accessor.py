@@ -15,6 +15,14 @@ from app.services.preview.uap.queries import (
     upsert_session_draw_query,
 )
 
+#: The template_vars keys :func:`bind_session_customer` writes. The chat tools
+#: read them as placeholders and the ledger groups a rider's sessions by
+#: ``rider_ref``, so only the server may set them: an anonymous widget session
+#: is opened without them (``widget/handlers.py``).
+BOUND_TEMPLATE_VARS = ("rider_ref", "session_id", "rider_mobile", "rider_token")
+#: The metadata key the session's ticket-payment ledger lives in.
+LEDGER_METADATA_KEY = "uap_draws"
+
 
 def _draws(value: Any) -> List[Dict[str, Any]]:
     if isinstance(value, str):

@@ -106,8 +106,8 @@ _RESPONSE_HEADERS = {
     # add a second, longer one on top.
     "Cache-Control": "no-cache",
     "Vary": "Origin",
-    # Widget paths bypass the CORS middleware and get a bare
-    # Access-Control-Allow-Origin: * at the ASGI layer; ETag is not a
+    # Widget paths bypass the CORS middleware and get only
+    # Access-Control-Allow-Origin at the ASGI layer; ETag is not a
     # CORS-safelisted response header, so the loader could not read it
     # cross-origin without this.
     "Access-Control-Expose-Headers": "ETag",

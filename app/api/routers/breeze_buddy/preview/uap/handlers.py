@@ -1,12 +1,15 @@
 import hmac
 import json
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
+from app.api.routers.breeze_buddy.chat.rbac import validate_chat_session_access
+from app.api.security.breeze_buddy.rbac_token import get_current_user_with_rbac
 from app.core.config.static import APP_BASE_URL, UAP_GATEWAY_REFERENCE_ID
 from app.core.logger import logger
 from app.crm.identity.contracts import get_customer, resolve
@@ -19,10 +22,12 @@ from app.crm.preview.uap.contracts import (
     get_latest_for_customer,
     list_drawable_for_customer,
     patch_attempt,
+    scope_covers_merchant,
     set_preferred_agent,
 )
 from app.database.accessor.breeze_buddy.chat_session import get_chat_session_by_id
 from app.database.accessor.breeze_buddy.credentials import get_all_credentials
+from app.schemas import UserInfo
 from app.schemas.breeze_buddy.chat import ChatSession, ChatSessionStatus
 from app.services.preview.uap import api as uap_api, ledger
 from app.services.preview.uap.accessor import bind_session_customer
@@ -333,7 +338,91 @@ async def _apply_agent_event(
 # ---- onboarding, status, draw ----
 
 
-onboarding_router = APIRouter()
+# ---------------------------------------------------------------------------
+# Who may call the page and chat-tool routes
+# ---------------------------------------------------------------------------
+
+
+async def _requested_session_id(request: Request) -> Optional[str]:
+    """The chat session a request names, read from where its route reads it:
+    the ``session_id`` query param on a GET, the ``session_id`` body field on
+    a POST. Never the other one — a POST that also carried the param would be
+    checked against one session and act on another. Starlette caches the
+    body, so the route's own model parse reads the same bytes afterwards."""
+    if request.method == "GET":
+        return request.query_params.get("session_id") or None
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    session_id = body.get("session_id") if isinstance(body, dict) else None
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+async def require_session_caller(
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user_with_rbac),
+) -> None:
+    """The gate on every page and chat-tool route: a login or S2S token whose
+    scope covers the tenant of the chat session the request names.
+
+    A session id is not a credential — it travels in page URLs and logs. And
+    the session's own widget token is deliberately not enough: /rider takes
+    the rider's identity on the caller's word, so the caller has to be the
+    merchant (its backend, or the chat tool with the merchant's token), not
+    an anonymous visitor who opened a session and names someone else.
+
+    Declared on the routers, not per route, so a new route cannot be added
+    without it. Fail closed: no token is 401 before anything is read; no
+    session id is 400; an unknown session and one outside the caller's scope
+    are the same 404 (``validate_chat_session_access``), so a caller cannot
+    probe which sessions exist.
+    """
+    session_id = await _requested_session_id(request)
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="session_id is required"
+        )
+    # Session ids are UUIDs and the lookup runs before the route validates
+    # its input: a malformed id would fail in the database driver (500). It
+    # can name no session, so it gets the unknown-session 404. Only the
+    # canonical spelling passes: uuid.UUID() also takes "{...}" and
+    # "urn:uuid:..." forms, which the driver refuses.
+    try:
+        canonical = str(uuid.UUID(session_id))
+    except ValueError:
+        canonical = None
+    if canonical != session_id.lower():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found"
+        )
+    session = await get_chat_session_by_id(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found"
+        )
+    validate_chat_session_access(current_user, session, operation="use UAP on")
+    # validate_chat_session_access reads "*" on merchants as any merchant and
+    # trusts the reseller stored on the session, which a template can pair
+    # with another reseller's merchant. The CRM doors' rule closes that: "*"
+    # on merchants covers only merchants whose own reseller is the token's.
+    # A null merchant was already limited to resellers and admins above.
+    if (
+        current_user.role != "admin"
+        and session.merchant_id
+        and not await scope_covers_merchant(current_user, session.merchant_id)
+    ):
+        logger.warning(
+            f"User {current_user.username} attempted to use UAP on chat session "
+            f"{session.id}: merchant {session.merchant_id} is outside the "
+            "token's resellers"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found"
+        )
+
+
+onboarding_router = APIRouter(dependencies=[Depends(require_session_caller)])
 
 
 class Scope:
@@ -1058,7 +1147,7 @@ async def draw_against_agent(payload: DrawRequest) -> Dict[str, Any]:
 # ---- ticket view ----
 
 
-ticket_router = APIRouter()
+ticket_router = APIRouter(dependencies=[Depends(require_session_caller)])
 
 
 def _route(contents: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -1185,6 +1274,8 @@ async def uap_ticket(
 
 
 # ---- the /uap router: webhook + page routes + chat-tool routes ----
+# The webhook is Juspay's and has its own gate (the ``token`` it was
+# registered with); every other route sits behind require_session_caller.
 router = APIRouter()
 router.include_router(webhook_router)
 router.include_router(onboarding_router)

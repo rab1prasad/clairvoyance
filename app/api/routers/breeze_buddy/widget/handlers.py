@@ -87,6 +87,7 @@ from app.core.config.dynamic import (
 )
 from app.core.config.static import BREEZE_BUDDY_STT_SERVICE
 from app.core.logger import logger
+from app.core.middleware.widget_cors_bypass import validated_origin
 from app.database.accessor import create_lead_call_tracker, get_lead_by_id
 from app.database.accessor.breeze_buddy.chat_session import (
     bind_voice_lead_to_chat_session,
@@ -148,6 +149,10 @@ from app.services.breeze_buddy.try_on import (
 )
 from app.services.breeze_buddy.wallet import deduct, has_sufficient_credits
 from app.services.breeze_buddy.wallet.exceptions import WalletNotFoundError
+from app.services.preview.uap.accessor import (
+    BOUND_TEMPLATE_VARS,
+    LEDGER_METADATA_KEY,
+)
 from app.services.redis.locks import (
     SESSION_LOCK_TTL_SECONDS,
     LockAcquireError,
@@ -422,13 +427,22 @@ async def create_widget_session_handler(
         rate_bucket="session_create",
         rate_limit=None,  # use cfg.max_sessions_per_ip_hour default
     )
-    return await open_widget_session(cfg, body, preview=False)
+    return await open_widget_session(
+        cfg, body, preview=False, origin=validated_origin(request)
+    )
 
 
 async def open_widget_session(
-    cfg: WidgetConfigResponse, body: WidgetSessionOptions, *, preview: bool
+    cfg: WidgetConfigResponse,
+    body: WidgetSessionOptions,
+    *,
+    preview: bool,
+    origin: Optional[str] = None,
 ) -> CreateWidgetSessionResponse:
     """Open a chat session on ``cfg`` and mint its widget token.
+
+    ``origin`` is the origin the storefront path validated; the token is
+    bound to it. The console preview path passes none.
 
     The caller has already decided this caller may: the storefront path
     checked key, active flag, origin and IP limit; the console preview
@@ -460,12 +474,25 @@ async def open_widget_session(
 
     synthetic_user = _synthetic_widget_user(cfg.id)
     saved_shop_url = (template.secrets or {}).get("shop_url")
+    # Keys only the server writes: the UAP rider binding and the session's
+    # ticket ledger. Taken from the client, they would point the payment
+    # tools at another rider or seed the ledger.
+    client_template_vars = {
+        key: value
+        for key, value in (body.template_vars or {}).items()
+        if key not in BOUND_TEMPLATE_VARS
+    }
+    client_metadata = {
+        key: value
+        for key, value in (body.metadata or {}).items()
+        if key != LEDGER_METADATA_KEY
+    }
     create_req = CreateChatSessionRequest(
         template_id=cfg.template_id,
         # The client's shop_url picks the host the commerce tools call; keep it
         # only when it names this store (N-WID-2).
         template_vars=verify_shop_url(
-            body.template_vars,
+            client_template_vars,
             [
                 saved_shop_url,
                 template.merchant_id,
@@ -478,7 +505,7 @@ async def open_widget_session(
         # via metadata — same precedence rule as ``template_vars`` in
         # ``create_chat_session_handler``.
         metadata={
-            **(body.metadata or {}),
+            **client_metadata,
             "widget": {
                 "widget_config_id": cfg.id,
                 "public_widget_key_prefix": cfg.public_widget_key[:6],
@@ -506,6 +533,7 @@ async def open_widget_session(
         widget_config_id=cfg.id,
         ttl_minutes=ttl_minutes,
         preview=preview,
+        origin=origin,
     )
 
     surface = _extract_widget_config(template)
