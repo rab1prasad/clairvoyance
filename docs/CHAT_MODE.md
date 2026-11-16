@@ -1018,12 +1018,21 @@ URL prefix `/agent/voice/breeze-buddy/widget`:
 | `/session/{id}/voice/end` | POST | widget_token | best-effort signal; drain runs in `end_conversation` |
 | `/session/{id}/end` | POST | widget_token | ends whole conversation; signals voice if live |
 | `/session/{id}` | GET | widget_token | resume payload for embed rehydrate |
-| OPTIONS on each | OPTIONS | none | permissive CORS preflight |
+| OPTIONS on each | OPTIONS | none | CORS preflight, passes for any origin |
 
-CORS preflight returns permissive headers (`Origin: *`, methods/
-headers/max-age) so the browser preflight succeeds for any merchant
-site. The per-merchant `allowed_origins` check runs **inside** the
-POST handler — application-layer enforcement, not transport-layer.
+CORS preflight succeeds for any merchant site (methods/headers/max-age,
+and `Access-Control-Allow-Origin` naming the caller's own origin). The
+per-merchant `allowed_origins` check runs **inside** the POST handler —
+application-layer enforcement, not transport-layer.
+
+`Access-Control-Allow-Origin` on a widget route is never `*`. It names
+the origin validated for the widget the request is about: the caller's,
+once it passed `allowed_origins` (session create, storefront config), or
+the `origin` claim of the widget token. A page on another site that
+sends the same request cannot read the answer. Preflights, refusals and
+the loader's "no widget on this shop" name the caller's own origin: they
+hold nothing of a merchant's and the embed has to read them. This binds
+browsers only; the allowlist check and the token stay the authorization.
 
 ### 18.5 Tokens
 
@@ -1036,9 +1045,13 @@ full 24-hour TTL. No re-mint at handoff. Claims:
   "typ": "widget",
   "widget_session_id": "<chat_session.id>",
   "widget_config_id": "<widget_config.id>",
+  "origin": "<the origin the session was opened from>",
   "iat": ..., "exp": ...
 }
 ```
+
+`origin` is set on the public door only (a console preview token has
+none). It is what the CORS answer names for every later request.
 
 Voice attachments inside that 24h are bounded separately by Daily
 room expiry (1h, set in `start_daily_session`). The widget can

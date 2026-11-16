@@ -25,6 +25,7 @@ from app.api.security.breeze_buddy.widget_token import (
     mint_widget_token,
     require_widget_session,
 )
+from app.core.middleware.widget_cors_bypass import validated_origin
 from app.schemas import UserInfo, UserRole
 from app.schemas.breeze_buddy.chat import (
     ChatSessionStatus,
@@ -64,9 +65,18 @@ def _request(origin: str) -> Request:
     )
 
 
-def _token_ctx(token: str):
+def _token_ctx(token: str, request: Request | None = None):
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-    return require_widget_session(session_id="s1", creds=creds)
+    return require_widget_session(
+        request=request or _request(STORE), session_id="s1", creds=creds
+    )
+
+
+def _token_origin(token: str) -> str | None:
+    """The origin a request with this token is answered for."""
+    request = _request("https://some-other-site.example")
+    _token_ctx(token, request)
+    return validated_origin(request)
 
 
 @pytest.fixture()
@@ -215,6 +225,37 @@ async def test_a_storefront_session_is_not_a_preview(monkeypatch, by_key, opened
     assert out.ttl_seconds == 24 * 60 * 60
 
 
+@pytest.mark.asyncio
+async def test_a_storefront_session_is_bound_to_the_store_origin(
+    monkeypatch, by_key, opened
+):
+    by_key(_cfg(active=True))
+    out = await widget_handlers.create_widget_session_handler(
+        CreateWidgetSessionRequest(public_widget_key="public-key-123"),
+        _request(STORE),
+    )
+    assert _token_origin(out.widget_token) == STORE
+
+
+@pytest.mark.asyncio
+async def test_a_preview_session_is_bound_to_no_origin(monkeypatch, opened):
+    out = await _preview(monkeypatch, active=True, merchant_ids=["store.myshopify.com"])
+    assert _token_origin(out.widget_token) is None
+
+
+@pytest.mark.asyncio
+async def test_a_refused_origin_is_never_recorded_as_validated(by_key):
+    by_key(_cfg(active=True))
+    request = _request(CONSOLE)
+    with pytest.raises(HTTPException):
+        await widget_common.resolve_widget_config_for_request(
+            request=request,
+            public_widget_key="public-key-123",
+            rate_bucket="session_create",
+        )
+    assert validated_origin(request) is None
+
+
 # -- the claim -------------------------------------------------------------
 
 
@@ -225,3 +266,12 @@ def test_preview_claim_rides_the_session_token():
     )
     assert _token_ctx(plain).preview is False
     assert _token_ctx(preview).preview is True
+
+
+def test_origin_claim_rides_the_session_token():
+    bound = mint_widget_token(
+        widget_session_id="s1", widget_config_id=WIDGET, origin=STORE
+    )
+    unbound = mint_widget_token(widget_session_id="s1", widget_config_id=WIDGET)
+    assert _token_origin(bound) == STORE
+    assert _token_origin(unbound) is None

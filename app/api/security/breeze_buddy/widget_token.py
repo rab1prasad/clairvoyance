@@ -21,6 +21,12 @@ the demo token (see ``demo_token.py``):
 - Pinned to ``widget_session_id``: the dependency rejects any
   path-param ``session_id`` that doesn't match — so a leaked token
   can't be steered to other sessions.
+- Bound to an origin: a token opened on the public door carries the
+  ``origin`` its session was validated for, and every answer to a
+  request with that token names that origin in
+  ``Access-Control-Allow-Origin``. A page on another site that got hold
+  of the token cannot read what comes back. (Browsers only — CORS does
+  not stop a non-browser client.)
 
 TTL default is 24 h. Voice attachments inside that 24 h are bounded
 separately by Daily room expiry (1 h).
@@ -30,13 +36,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Dict, Optional
 
 import jwt as pyjwt
-from fastapi import Depends, HTTPException, Path, status
+from fastapi import Depends, HTTPException, Path, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.logger import logger
+from app.core.middleware.widget_cors_bypass import remember_validated_origin
 from app.core.security.jwt import jwt_manager
 
 # Shared HTTPBearer scheme so the OpenAPI doc shows one consistent
@@ -78,8 +85,13 @@ def mint_widget_token(
     widget_config_id: str,
     ttl_minutes: int = DEFAULT_WIDGET_TOKEN_TTL_MINUTES,
     preview: bool = False,
+    origin: Optional[str] = None,
 ) -> str:
     """Issue a widget JWT bound to ``widget_session_id``.
+
+    ``origin`` is the origin the session was validated for (the caller's,
+    after the ``allowed_origins`` check). It rides the token so every later
+    answer can name it. A console preview token has none.
 
     ``sub`` is a fresh anonymous identifier (``widget-<short-uuid>``) —
     useful in logs but never used for authorization. The real gates are
@@ -97,6 +109,8 @@ def mint_widget_token(
     }
     if preview:
         payload["preview"] = True
+    if origin:
+        payload["origin"] = origin
     return jwt_manager.create_access_token(
         payload, expires_delta=timedelta(minutes=ttl_minutes)
     )
@@ -126,6 +140,7 @@ def _decode_or_401(token: str) -> Dict[str, Any]:
 
 
 def require_widget_session(
+    request: Request,
     session_id: Annotated[str, Path(...)],
     creds: Annotated[HTTPAuthorizationCredentials, Depends(_widget_bearer)],
 ) -> WidgetSessionContext:
@@ -135,6 +150,12 @@ def require_widget_session(
     that its bound ``widget_session_id`` matches the URL path. Either
     check failing yields 401 — same status as the standard RBAC /
     demo deps so clients don't have to special-case widget failures.
+
+    Also hands the token's ``origin`` to the CORS layer, so the answer —
+    refusals below included — names the origin the session was opened
+    from. A token without the claim (a console preview, or one minted
+    before the claim existed; those expire within a day) leaves the
+    answer naming the caller's own origin, as before.
     """
     payload = _decode_or_401(creds.credentials)
 
@@ -144,6 +165,10 @@ def require_widget_session(
             detail="Token is not a widget token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    origin = payload.get("origin")
+    if isinstance(origin, str) and origin:
+        remember_validated_origin(request, origin)
 
     claim_session = payload.get("widget_session_id")
     if not isinstance(claim_session, str) or claim_session != session_id:
