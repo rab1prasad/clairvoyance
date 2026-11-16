@@ -3,11 +3,13 @@ Breeze Buddy specific RBAC token management.
 Handles JWT token creation and verification with Breeze Buddy's RBAC model.
 """
 
+import asyncio
+import json
 from datetime import timedelta
 from typing import List, Optional
 
 import jwt as pyjwt
-from fastapi import Depends, HTTPException, WebSocket, status
+from fastapi import Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.logger import logger
@@ -272,13 +274,50 @@ async def get_current_user_with_rbac(
     return rbac_token_manager.verify_rbac_token(credentials.credentials)
 
 
-def get_user_from_websocket(websocket: WebSocket) -> UserInfo:
+#: Seconds a WebSocket client that sent no Authorization header gets to send
+#: its auth message. Until then the socket is held by a caller nobody knows.
+WEBSOCKET_AUTH_TIMEOUT_SECONDS = 10.0
+
+
+async def _token_from_first_message(websocket: WebSocket) -> str:
+    """The token in a ``{"type": "auth", "token": "<JWT>"}`` first message.
+
+    Empty string for everything else: no message in time, a disconnect, a
+    binary frame (Starlette raises KeyError for it), text that is not JSON
+    (or is nested too deep to parse: ``json.loads`` raises RecursionError for
+    that, which is not a ValueError), or JSON that is not an auth message.
+    """
+    try:
+        raw = await asyncio.wait_for(
+            websocket.receive_text(), timeout=WEBSOCKET_AUTH_TIMEOUT_SECONDS
+        )
+        message = json.loads(raw)
+    except (
+        WebSocketDisconnect,
+        asyncio.TimeoutError,
+        KeyError,
+        ValueError,
+        RecursionError,
+    ):
+        return ""
+    if not isinstance(message, dict) or message.get("type") != "auth":
+        return ""
+    token = message.get("token")
+    return token.strip() if isinstance(token, str) else ""
+
+
+async def get_user_from_websocket(websocket: WebSocket) -> UserInfo:
     """Authenticate a WebSocket connection with the standard RBAC bearer token.
 
     The FastAPI ``Depends(HTTPBearer())`` guards are HTTP-only, so WebSocket
     routes call this directly after ``accept()``. Token sources, in order:
-    the ``Authorization: Bearer`` header, then a ``token`` query parameter
-    (browser WebSocket clients cannot set headers).
+    the ``Authorization: Bearer`` header, then the connection's first text
+    message, ``{"type": "auth", "token": "<JWT>"}`` (browser WebSocket clients
+    cannot set headers).
+
+    Never the URL. A query string is written to load balancer and proxy
+    access logs, so a login token sent as ``?token=`` can be read there by
+    anyone who can read the logs.
 
     Raises:
         HTTPException: 401 when the token is missing or invalid — callers
@@ -289,7 +328,7 @@ def get_user_from_websocket(websocket: WebSocket) -> UserInfo:
     if auth_header.lower().startswith("bearer "):
         token = auth_header[len("bearer ") :].strip()
     if not token:
-        token = (websocket.query_params.get("token") or "").strip()
+        token = await _token_from_first_message(websocket)
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

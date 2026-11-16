@@ -9,8 +9,8 @@ Unlike the widget push-to-talk route (``/widget/session/{id}/transcribe``),
 these endpoints are bound to no widget session and no template: the caller
 passes the STT ``provider`` and (optionally) ``model``/``language`` directly.
 Both sit behind the standard RBAC bearer auth, so interactive dashboard users
-and machine (S2S) callers can reach them (the WebSocket accepts the token via
-``Authorization`` header or ``?token=`` query param).
+and machine (S2S) callers can reach them (the WebSocket takes the token in the
+``Authorization`` header or in its first message, never in the URL).
 """
 
 from typing import Any, Dict, List, Optional

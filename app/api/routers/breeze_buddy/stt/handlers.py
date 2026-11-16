@@ -244,8 +244,10 @@ async def handle_transcription_stream(ws: WebSocket) -> None:
 
     Protocol:
 
-    1. Client connects with the RBAC bearer token (``Authorization`` header or
-       ``?token=`` query param).
+    1. Client connects and presents the RBAC bearer token: machine callers in
+       the ``Authorization`` header, browsers (which cannot set one) as their
+       first text message, ``{"type": "auth", "token": "<JWT>"}``. A token in
+       the URL is not read.
     2. Client sends one JSON text message — :class:`TranscriptionStreamRequest`
        (``provider``, optional ``model``/``language``/``sample_rate``).
     3. Server replies ``{"type": "ready"}``, then the client streams binary
@@ -264,7 +266,7 @@ async def handle_transcription_stream(ws: WebSocket) -> None:
     await ws.accept()
 
     try:
-        user = get_user_from_websocket(ws)
+        user = await get_user_from_websocket(ws)
     except HTTPException as e:
         await _reject_stream(ws, _WS_UNAUTHORIZED, str(e.detail), "unauthorized")
         return
