@@ -1131,3 +1131,47 @@ async def test_default_accessor_still_swallows_db_errors(monkeypatch):
     monkeypatch.setattr(tn_mod, "run_parameterized_query", _boom)
     assert await tn_mod.increment_telephony_number_channels("num-x") is None
     assert await calls_mod._acquire_number(_plivo_number()) is (w.NumberAcquire.ERROR)
+
+
+async def test_failed_blacklist_check_defers_lead(harness, fake_redis, monkeypatch):
+    """Blacklist check failed (None) → lead deferred, not finished, no call."""
+    lead = make_lead("lead-bl-err")
+    harness.add_lead(lead)
+
+    async def _check_failed(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(w, "is_number_blacklisted", _check_failed)
+
+    await init_channel_semaphore(harness.number.id, 1)
+    await push_ready(fake_redis, lead.id)
+
+    worker = w.Worker(worker_uuid="w-bl-err")
+    await worker._iteration(session=None)
+
+    assert harness.call_recorder.calls == []
+    assert harness.completions == []
+    assert harness.deferred == [("lead-bl-err", 60)]
+    assert lead.status == LeadCallStatus.BACKLOG
+
+
+async def test_blacklisted_lead_keeps_its_meta_data(harness, fake_redis):
+    """The finish adds the reason to what is already on the lead (playground
+    flag, overrides); it does not replace it."""
+    lead = make_lead("lead-bl-meta")
+    lead.metaData = {"playground": True, "flow_override": "x"}
+    harness.add_lead(lead)
+    harness.is_blacklisted = True
+
+    await init_channel_semaphore(harness.number.id, 1)
+    await push_ready(fake_redis, lead.id)
+
+    await w.Worker(worker_uuid="w-bl-meta")._iteration(session=None)
+
+    (completion,) = harness.completions
+    assert completion["outcome"] == "BLACKLISTED"
+    assert completion["meta_data"] == {
+        "playground": True,
+        "flow_override": "x",
+        "reason": "Phone number is blacklisted",
+    }

@@ -439,14 +439,23 @@ class Worker:
                 return
 
             customer_phone = (locked.payload or {}).get("customer_mobile_number")
-            if customer_phone and await is_number_blacklisted(
-                customer_phone, locked.reseller_id
-            ):
+            blacklisted = customer_phone and await is_number_blacklisted(
+                customer_phone, locked.reseller_id, locked.merchant_id
+            )
+            if blacklisted is None:
+                # The check failed: retry the lead, never finish it as BLACKLISTED.
+                lock_released = await self._defer_and_release(locked.id, 60)
+                return
+            if blacklisted:
+                # Keep what is already on the lead: the update replaces meta_data.
                 await update_lead_call_completion_details(
                     id=locked.id,
                     status=LeadCallStatus.FINISHED,
                     outcome="BLACKLISTED",
-                    meta_data={"reason": "Phone number is blacklisted"},
+                    meta_data={
+                        **(locked.metaData or {}),
+                        "reason": "Phone number is blacklisted",
+                    },
                     call_end_time=datetime.now(timezone.utc),
                 )
                 lock_released = await self._release(locked.id)
