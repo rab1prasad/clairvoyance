@@ -46,13 +46,17 @@ def build_vertex_llm(config: VertexConfig) -> GoogleVertexLLMService:
         f"thinking_budget={config.thinking_budget}, thinking_level={config.thinking_level}"
     )
 
-    # Build thinking config if either budget or level is provided
+    # Only the fields the template set: pipecat sends every field it is handed,
+    # and an empty thinking_level makes chat add a level next to the budget,
+    # which Gemini rejects.
+    thinking_fields = {
+        "thinking_budget": config.thinking_budget,
+        "thinking_level": config.thinking_level,
+    }
+    thinking_fields = {k: v for k, v in thinking_fields.items() if v is not None}
     thinking = None
-    if config.thinking_budget is not None or config.thinking_level is not None:
-        thinking = GoogleLLMService.ThinkingConfig(
-            thinking_budget=config.thinking_budget,
-            thinking_level=config.thinking_level,
-        )
+    if thinking_fields:
+        thinking = GoogleLLMService.ThinkingConfig.model_validate(thinking_fields)
 
     settings_kwargs: dict[str, Any] = {
         "max_tokens": config.max_tokens,
