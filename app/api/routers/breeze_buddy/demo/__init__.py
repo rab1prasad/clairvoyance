@@ -11,7 +11,10 @@ from fastapi import APIRouter, Request
 
 from .handlers import DemoConnectRequest, breeze_buddy_demo_connect_handler
 
-router = APIRouter()
+# No login on this route, so a page on another site could post to it from a
+# visitor's browser. A JSON body with no Content-Type needs no preflight; the
+# app parses such a body (main.py), this router does not.
+router = APIRouter(strict_content_type=True)
 
 
 @router.post("/demo/connect", tags=["demo"])

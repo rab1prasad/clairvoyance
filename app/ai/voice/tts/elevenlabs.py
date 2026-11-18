@@ -47,6 +47,25 @@ class ElevenLabsConfig:
     enable_ssml_parsing: bool = False
 
 
+# The v3 voice models only work through DragonTTS. Asked directly, ElevenLabs'
+# streaming endpoint refuses every v3 name (HTTP 400 unsupported_model) and the
+# bot is silent for the whole call, and its one-shot endpoint does not know the
+# DragonTTS-side names. A direct call (DragonTTS marked unhealthy, or caching
+# off) speaks on this model instead, with the template's voice id.
+_DIRECT_MODEL_FOR_V3 = "eleven_flash_v2_5"
+
+
+def _direct_model(model: str) -> str:
+    """The model to ask ElevenLabs itself for, given a template's model."""
+    if model.startswith("eleven_v3"):
+        logger.warning(
+            f"{model} only works through DragonTTS; "
+            f"this direct ElevenLabs call speaks on {_DIRECT_MODEL_FOR_V3}"
+        )
+        return _DIRECT_MODEL_FOR_V3
+    return model
+
+
 class ElevenLabsTTSServiceWithQuickClose(ElevenLabsTTSService):
     async def _disconnect_websocket(self):
         try:
@@ -73,7 +92,7 @@ def build_elevenlabs_tts(config: ElevenLabsConfig):
         max_consecutive_zero_audio_contexts=0,
         api_key=config.api_key,
         voice_id=config.voice_id,
-        model=config.model,
+        model=_direct_model(config.model),
         url=config.url,
         enable_ssml_parsing=config.enable_ssml_parsing,
         settings=ElevenLabsTTSSettings(
@@ -127,7 +146,7 @@ async def _generate_elevenlabs_audio(
 
     # Use provided values or fall back to defaults
     final_voice_id = voice_id if voice_id else ELEVENLABS_BB_VOICE_ID
-    final_model_id = model_id if model_id else ELEVENLABS_MODEL_ID
+    final_model_id = _direct_model(model_id if model_id else ELEVENLABS_MODEL_ID)
 
     url = f"{base_url}/v1/text-to-speech/{final_voice_id}?output_format=ulaw_8000"
     headers = {

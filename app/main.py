@@ -418,6 +418,9 @@ app = FastAPI(
     openapi_url=None,
     docs_url=None,
     redoc_url=None,
+    # A client that sends JSON with no Content-Type keeps working. Routes with
+    # a header token are safe either way (the header forces a preflight); the
+    # public demo routers set this back to True.
     strict_content_type=False,
 )
 
