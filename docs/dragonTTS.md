@@ -209,6 +209,8 @@ The in-flight counter **must** stay >0 for the entire lifetime of a streamed res
 ### Clairvoyance consumer-side kill switch (the real gate)
 Clairvoyance independently watches DragonTTS: a scheduler task probes `/health` (~60s); on failure it one-way marks a Redis flag `dragontts:health = "0"`, and `enable_tts_caching` templates then **bypass DragonTTS and use their upstream provider directly** (no user-facing silence). DragonTTS's `/drain` flip is the *instant* version of this (no 60s lag); the monitor is the backstop.
 
+ElevenLabs does not serve its v3 models (`eleven_v3*`, including the `eleven_v3_conversational_clean_tempo` names) on a direct connection: it refuses the stream with HTTP 400. While the bypass is on, a template on a v3 model therefore speaks on `eleven_flash_v2_5` with the same voice id (`_direct_model` in `app/ai/voice/tts/elevenlabs.py`). The voice sounds somewhat different until the flag is restored.
+
 ### ✅ Zero-downtime despite a single-pod architecture
 DragonTTS runs as **one replica** — yet a pod restart causes **no user-facing
 TTS downtime**. The trick isn't HA at the DragonTTS layer; it's **graceful

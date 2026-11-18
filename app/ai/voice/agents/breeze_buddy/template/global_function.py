@@ -90,8 +90,12 @@ def _flows_async_kwargs(
     ):
         # Warm transfer blocks well past the 10s function_call_timeout_secs
         # default (esp. MPC dial-first). Force a safe ceiling unless the
-        # template set an explicit override above.
-        extra["timeout_secs"] = _TRANSFER_FUNCTION_TIMEOUT_SECS
+        # template set an explicit override above. The announcement is spoken
+        # inside the same call, before the dial, so its wait goes on top:
+        # pipecat 1.14 cancels the handler at the ceiling, mid-ring.
+        extra["timeout_secs"] = _TRANSFER_FUNCTION_TIMEOUT_SECS + (
+            PRE_TTS_WAIT_SECS if func.pre_tts_message else 0
+        )
     elif isinstance(func, GlobalBuiltinFunction) and func.handler == "end_conversation":
         extra["timeout_secs"] = _END_CONVERSATION_TIMEOUT_SECS + (
             PRE_TTS_WAIT_SECS if func.pre_tts_message else 0

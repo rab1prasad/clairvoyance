@@ -79,7 +79,10 @@ from app.schemas.breeze_buddy.chat import (
 )
 from app.services.redis.rate_limit import check_rate_limit
 
-router = APIRouter()
+# Session creation needs no login, so a page on another site could post to it
+# from a visitor's browser. A JSON body with no Content-Type needs no preflight;
+# the app parses such a body (main.py), this router does not.
+router = APIRouter(strict_content_type=True)
 
 # One-hour fixed window for both buckets — the cap (per session-creates,
 # per messages) is what shapes abuse resistance, not the granularity.

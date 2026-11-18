@@ -261,5 +261,20 @@ def test_async_kwargs_end_conversation_gets_a_finalization_ceiling():
     assert _flows_async_kwargs(func)["timeout_secs"] == 12.0
 
 
+def test_async_kwargs_warm_transfer_ceiling_covers_its_announcement():
+    # The handler waits up to 35 s for the agent. The announcement (up to 15 s)
+    # is spoken inside the same function call, so it must not eat into that.
+    func = _builtin(handler="connect_to_live_agent")
+    assert _flows_async_kwargs(func)["timeout_secs"] == 45.0
+    func = _builtin(handler="connect_to_live_agent", pre_tts_message="Please hold")
+    assert _flows_async_kwargs(func)["timeout_secs"] == 60.0
+    func = _builtin(
+        handler="connect_to_live_agent",
+        pre_tts_message="Please hold",
+        timeout_secs=12.0,
+    )
+    assert _flows_async_kwargs(func)["timeout_secs"] == 12.0
+
+
 def test_async_kwargs_builtin_without_pre_tts_message_sets_no_timeout():
     assert "timeout_secs" not in _flows_async_kwargs(_builtin())

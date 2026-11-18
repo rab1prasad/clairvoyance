@@ -50,6 +50,23 @@ def gemini_realtime_from_configurations(configurations) -> Optional[Any]:
     return None
 
 
+# pipecat 1.14 pushes this error for every TTS turn that ends without audio.
+# That includes a sentence whose first audio only arrives after pipecat's 3 s
+# idle wait: the turn is closed as silent and the sentence is then spoken
+# anyway (seen on ElevenLabs v3 through DragonTTS). pipecat logs its own
+# warning for it, and 1.1.0 reported nothing here.
+_SILENT_TTS_TURN = re.compile(r"TTS context \S+ completed with no audio")
+
+
+def is_silent_tts_turn_report(error_msg: str) -> bool:
+    """Whether a pipeline error is pipecat's note that one TTS turn had no audio.
+
+    The run of several in a row ("N consecutive TTS contexts completed with no
+    audio"), which marks the TTS service as failed, is not matched.
+    """
+    return _SILENT_TTS_TURN.fullmatch(error_msg) is not None
+
+
 def track_error(
     errors: Optional[List[Dict[str, Any]]],
     error_msg: str,

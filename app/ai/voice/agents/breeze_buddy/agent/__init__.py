@@ -119,6 +119,7 @@ from app.ai.voice.agents.breeze_buddy.utils.agent_transfer import (
     TransportRebuildContext,
 )
 from app.ai.voice.agents.breeze_buddy.utils.common import (
+    is_silent_tts_turn_report,
     track_error,
 )
 from app.ai.voice.agents.breeze_buddy.utils.transport.daily_keepalive import (
@@ -864,6 +865,11 @@ class Agent:
             processor = getattr(error, "processor", "unknown")
             error_msg = getattr(error, "error", str(error))
             detailed_msg = f"[PIPELINE] {processor}: {error_msg}"
+            if is_silent_tts_turn_report(str(error_msg)):
+                # Not a failed call: neither stored on the lead nor shown to
+                # the client as a pipeline error.
+                logger.info(f"{detailed_msg} (not recorded as a call error)")
+                return
             logger.info(f"[PIPELINE_ERROR] {detailed_msg}")
             track_error(self.errors, detailed_msg)
             if self._rtvi_processor:
