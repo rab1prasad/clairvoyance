@@ -79,7 +79,9 @@ class EvalEngine(ABC):
     ) -> Verdict:
         """The pipeline: state -> request -> provider -> transform."""
         state = build_state(context)
-        # the row picked the provider; the validator guaranteed it is one of ours
+        # the row picked the provider; the validator guaranteed it is one of ours.
+        # the custom provider is reached at the endpoint its api_url_name /
+        # api_key_name name
         provider = await resolve_provider(configuration)
         response = await provider.generate(self.build_request(state, configuration))
         return self.transform(response, configuration)

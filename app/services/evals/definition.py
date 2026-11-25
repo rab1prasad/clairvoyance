@@ -14,7 +14,8 @@ Code knows no question by name: whatever should be judged — the call's
 outcome, loops, anything — is a question in the agent's configuration,
 and its answer is stored as such. The validator checks only the
 engine-agnostic envelope — a known engine, a provider that engine
-supports, a model, and no key that neither the engine nor the provider
+supports, a model, for the custom provider the names of the config keys
+holding its URL and key, and no key that neither the engine nor the provider
 owns — and hands the rest to the engine class, whose primitives they are:
 the structured engine's score/choice/noul rules are its own, not the
 type's. Keys beyond the envelope are the engine's (``questions``; the
@@ -27,11 +28,16 @@ from typing import Mapping
 from pydantic import BaseModel
 
 from app.services.evals.engines import ENGINES
+from app.services.model_provider import CustomSystemOneProvider
 
 # the envelope every row shares; the engine adds its own keys
 # (``configuration_keys``: structured -> questions) and decodes the whole
-# row into its own configuration type
-_ENVELOPE_KEYS = frozenset({"engine", "provider", "model"})
+# row into its own configuration type. api_url_name / api_key_name name the
+# config keys (Redis, then environment) holding the custom provider's URL
+# and key, read at run time (model_provider.resolve_provider)
+_ENVELOPE_KEYS = frozenset(
+    {"engine", "provider", "model", "api_url_name", "api_key_name"}
+)
 
 
 def validate_evals_configuration(configuration: object) -> BaseModel:
@@ -69,5 +75,21 @@ def validate_evals_configuration(configuration: object) -> BaseModel:
     model = config.get("model")
     if not isinstance(model, str) or not model.strip():
         raise ValueError("model must be a non-empty string")
+    for name in ("api_url_name", "api_key_name"):
+        value = config.get(name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{name} must be a non-empty string when given")
+    # the custom provider has no endpoint but the one its row names; every
+    # other provider has its own, and is never pointed elsewhere
+    if provider_name == CustomSystemOneProvider.name:
+        if not config.get("api_url_name") or not config.get("api_key_name"):
+            raise ValueError(
+                f"provider {provider_name!r} needs api_url_name and api_key_name"
+            )
+    elif config.get("api_url_name") or config.get("api_key_name"):
+        raise ValueError(
+            f"api_url_name and api_key_name are for provider "
+            f"{CustomSystemOneProvider.name!r} only"
+        )
 
     return engine_class.validate_configuration(config)

@@ -31,6 +31,7 @@ from app.services.evals.engines.common import (
     build_state,
 )
 from app.services.model_provider import (
+    CustomSystemOneProvider,
     GenerateRequest,
     GenerateResponse,
     TypeSafeProvider,
@@ -315,8 +316,9 @@ def decide(
 class StructuredJudgeEngine(EvalEngine):
     name = "structured"
     channels = frozenset({ConversationChannel.VOICE, ConversationChannel.CHAT})
-    # System One reads the questions natively
-    providers = frozenset({TypeSafeProvider.name})
+    # System One reads the questions natively: TypeSafe's, or another
+    # endpoint through the custom provider
+    providers = frozenset({TypeSafeProvider.name, CustomSystemOneProvider.name})
     configuration_keys = frozenset({"questions"})
 
     def validate_configuration(

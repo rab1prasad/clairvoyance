@@ -268,6 +268,45 @@ def test_validator_rejects_unknown_engine_and_keys():
         validate_evals_configuration(config)
 
 
+_GRID = {
+    "provider": "custom",
+    "api_url_name": "GRID_URL",
+    "api_key_name": "GRID_API",
+}
+
+
+def test_a_custom_provider_row_names_the_config_keys_of_its_url_and_key():
+    config = {**copy.deepcopy(EXAMPLE_CONFIGURATION), **_GRID}
+    assert validate_evals_configuration(config).model_dump()["engine"] == "structured"
+
+    # it has no endpoint of its own: both names are needed
+    for missing in ("api_url_name", "api_key_name"):
+        partial = {**copy.deepcopy(EXAMPLE_CONFIGURATION), **_GRID}
+        del partial[missing]
+        with pytest.raises(ValueError, match="needs api_url_name and api_key_name"):
+            validate_evals_configuration(partial)
+    for bad in ("  ", 7, ["GRID_API"]):
+        config = {**copy.deepcopy(EXAMPLE_CONFIGURATION), **_GRID, "api_key_name": bad}
+        with pytest.raises(ValueError, match="api_key_name must be a non-empty"):
+            validate_evals_configuration(config)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        {"api_url_name": "GRID_URL", "api_key_name": "GRID_API"},
+        {"api_key_name": "GRID_API"},
+        {"api_url_name": "GRID_URL"},
+    ],
+)
+def test_typesafe_keeps_its_own_endpoint(names):
+    # never TypeSafe's key to another host, nor another key to TypeSafe
+    config = {**copy.deepcopy(EXAMPLE_CONFIGURATION), **names}
+    assert config["provider"] == "typesafe"
+    with pytest.raises(ValueError, match="for provider 'custom' only"):
+        validate_evals_configuration(config)
+
+
 def test_instruction_and_settings_are_the_prompt_engines_keys():
     # instruction/settings brief the prompt engine's chat model: accepted as
     # written on a prompt row — even blank or misshapen, the engine reads
@@ -649,6 +688,33 @@ async def test_structured_evaluate_routes_to_the_configured_provider(monkeypatch
     # verdict is decide() over the body, with the model that actually served
     assert verdict.result == decide(RECORDED_ANSWERS, EXAMPLE_CONFIGURATION).result
     assert verdict.model == "jev-1.13.0-b"
+
+
+async def test_structured_evaluate_uses_the_rows_named_endpoint(monkeypatch):
+    provider = FakeProvider({"answers": RECORDED_ANSWERS, "model": "jev-1.13.0"})
+    named = FakeProvider({"answers": RECORDED_ANSWERS, "model": "jev-latest"})
+    asked = []
+
+    async def resolve_provider(configuration):
+        asked.append(
+            (
+                configuration["provider"],
+                configuration["api_url_name"],
+                configuration["api_key_name"],
+            )
+        )
+        return named
+
+    monkeypatch.setattr(
+        "app.services.evals.engines.base.resolve_provider", resolve_provider
+    )
+    configuration = {**EXAMPLE_CONFIGURATION, **_GRID}
+
+    verdict = await StructuredJudgeEngine().evaluate(_voice_context(), configuration)
+
+    assert asked == [("custom", "GRID_URL", "GRID_API")]
+    assert len(named.calls) == 1 and not provider.calls
+    assert verdict.model == "jev-latest"
 
 
 async def test_engines_name_providers_the_registry_builds():
