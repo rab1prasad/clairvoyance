@@ -31,6 +31,10 @@ class AnalyticsType(str, Enum):
     CHATS_BY_HOUR = "chats-by-hour"
     TOPIC_DASHBOARD = "topic-dashboard"
     TOPIC_CONVERSATIONS = "topic-conversations"
+    OUTCOME_CORRECTNESS_DASHBOARD = "outcome-correctness-dashboard"
+    OUTCOME_CORRECTNESS_CALLS = "outcome-correctness-calls"
+    EVAL_DASHBOARD = "eval-dashboard"
+    EVAL_CALLS = "eval-calls"
 
     @classmethod
     def _missing_(cls, value: object) -> Optional["AnalyticsType"]:
@@ -144,6 +148,45 @@ class AnalyticsFilters(BaseModel):
         None,
         max_length=5,
         description="Topic analytics: segment key -> values; a conversation matches when it has one of the values of every key",
+    )
+    # --- eval analytics -----------------------------------------------------
+    check_result: Optional[
+        Literal["agreed", "changed", "kept", "no_decision", "no_answer"]
+    ] = Field(
+        None,
+        description="outcome-correctness-calls: only checks with this result",
+    )
+    agent_outcome: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="outcome-correctness-calls: the agent's own outcome word",
+    )
+    eval_outcome: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="outcome-correctness-calls: the eval's outcome word",
+    )
+    eval_name: Optional[str] = Field(
+        None,
+        pattern=r"^[a-z][a-z0-9_]{0,63}$",
+        description="eval-dashboard / eval-calls: the agent's custom eval",
+    )
+    question_key: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="eval-calls: the question the answer filter applies to",
+    )
+    answer: Optional[str] = Field(
+        None,
+        max_length=500,
+        description=(
+            "eval-calls: only calls where the question got this answer, as the "
+            "dashboard counts it (yes / no, a score's level, a choice's option)"
+        ),
+    )
+    only_unsure: Optional[bool] = Field(
+        None,
+        description="eval-calls: only calls with an answer under 0.80 confidence",
     )
 
 

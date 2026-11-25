@@ -8,7 +8,7 @@ addressed by its name.
 """
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _CONFIG_COLUMNS = (
     "id, template_id, evaluation_type::text AS evaluation_type, name, "
@@ -75,11 +75,19 @@ def get_outcome_correctness_query(template_id: str) -> Tuple[str, List[Any]]:
     """The preset outcome_correctness row (its engine, model and threshold)
     when the eval is on for this agent: the agent's own row of that name
     decides, enabled or disabled; without one, the preset row's own flag
-    (the default for every agent)."""
+    (the default for every agent). The agent's own ``min_confidence``, when
+    it set one, replaces the preset's; everything else stays the preset's."""
     query = """
         SELECT builtin.id, builtin.template_id,
                builtin.evaluation_type::text AS evaluation_type, builtin.name,
-               builtin.enabled, builtin.topics, builtin.configuration
+               builtin.enabled, builtin.topics,
+               CASE
+                   WHEN own.configuration -> 'min_confidence' IS NOT NULL
+                   THEN builtin.configuration || jsonb_build_object(
+                       'min_confidence', own.configuration -> 'min_confidence'
+                   )
+                   ELSE builtin.configuration
+               END AS configuration
         FROM evaluation_config builtin
         LEFT JOIN evaluation_config own
           ON own.template_id = $1::uuid
@@ -89,6 +97,172 @@ def get_outcome_correctness_query(template_id: str) -> Tuple[str, List[Any]]:
           AND COALESCE(own.enabled, builtin.enabled)
     """
     return query, [template_id, OUTCOME_CORRECTNESS]
+
+
+def get_outcome_correctness_settings_query(
+    template_id: Optional[str],
+) -> Tuple[str, List[Any]]:
+    """The preset outcome_correctness row and, for an agent, its own row of
+    that name (NULLs without one), for the settings API. ``template_id``
+    None reads the preset row alone."""
+    query = """
+        SELECT builtin.enabled, builtin.configuration,
+               own.enabled AS own_enabled, own.configuration AS own_configuration
+        FROM evaluation_config builtin
+        LEFT JOIN evaluation_config own
+          ON own.template_id = $1::uuid
+         AND own.name = builtin.name
+        WHERE builtin.template_id IS NULL
+          AND builtin.name = $2
+    """
+    return query, [template_id, OUTCOME_CORRECTNESS]
+
+
+def save_outcome_correctness_setting_query(
+    template_id: str,
+    enabled: Optional[bool],
+    settings: Dict[str, Any],
+    cleared: List[str],
+) -> Tuple[str, List[Any]]:
+    """Set the agent's own outcome_correctness settings, creating its row
+    when it has none. ``enabled`` None keeps the flag (a new row starts on
+    the preset's); ``settings`` (min_confidence) are written, ``cleared``
+    keys removed so the agent follows the preset again. A new row carries
+    the preset's engine, provider and model only because every
+    CONVERSATION_EVALS row must (evaluation_config_runtime_check): the
+    runtime reads the agent's flag and min_confidence alone."""
+    query = f"""
+        INSERT INTO evaluation_config (
+            template_id, evaluation_type, name, enabled, configuration
+        )
+        SELECT
+            $1::uuid, builtin.evaluation_type, builtin.name,
+            COALESCE($2::boolean, builtin.enabled),
+            (
+                jsonb_build_object(
+                    'engine', builtin.configuration -> 'engine',
+                    'provider', builtin.configuration -> 'provider',
+                    'model', builtin.configuration -> 'model',
+                    'questions', '[]'::jsonb
+                ) || $3::jsonb
+            ) - $4::text[]
+        FROM evaluation_config builtin
+        WHERE builtin.template_id IS NULL
+          AND builtin.name = $5
+        ON CONFLICT (template_id, name) DO UPDATE
+            SET enabled = COALESCE($2::boolean, evaluation_config.enabled),
+                configuration = (evaluation_config.configuration || $3::jsonb)
+                    - $4::text[]
+        RETURNING {_CONFIG_COLUMNS}
+    """
+    return query, [
+        template_id,
+        enabled,
+        json.dumps(settings),
+        cleared,
+        OUTCOME_CORRECTNESS,
+    ]
+
+
+def update_outcome_correctness_default_query(
+    enabled: Optional[bool],
+    settings: Dict[str, Any],
+) -> Tuple[str, List[Any]]:
+    """Change the preset row, the default of every agent without its own
+    setting. ``enabled`` None keeps the flag."""
+    query = f"""
+        UPDATE evaluation_config
+        SET enabled = COALESCE($1::boolean, enabled),
+            configuration = configuration || $2::jsonb
+        WHERE template_id IS NULL
+          AND name = $3
+        RETURNING {_CONFIG_COLUMNS}
+    """
+    return query, [enabled, json.dumps(settings), OUTCOME_CORRECTNESS]
+
+
+# --- the agent's custom evals ----------------------------------------------
+# Its CONVERSATION_EVALS rows but the preset's (NOT_CUSTOM_EVALS),
+# addressed by name. None is
+# ever deleted: an eval is turned off, and a disabled eval neither runs nor
+# shows in analytics.
+
+
+def list_custom_evals_query(template_id: str) -> Tuple[str, List[Any]]:
+    query = f"""
+        SELECT {_CONFIG_COLUMNS}
+        FROM evaluation_config
+        WHERE template_id = $1::uuid
+          AND evaluation_type = 'CONVERSATION_EVALS'
+          AND name <> ALL($2::text[])
+        ORDER BY name
+    """
+    return query, [template_id, NOT_CUSTOM_EVALS]
+
+
+def get_custom_eval_query(template_id: str, name: str) -> Tuple[str, List[Any]]:
+    query = f"""
+        SELECT {_CONFIG_COLUMNS}
+        FROM evaluation_config
+        WHERE template_id = $1::uuid
+          AND evaluation_type = 'CONVERSATION_EVALS'
+          AND name = $2
+          AND name <> ALL($3::text[])
+    """
+    return query, [template_id, name, NOT_CUSTOM_EVALS]
+
+
+def create_custom_eval_query(
+    template_id: str,
+    name: str,
+    configuration: Dict[str, Any],
+    enabled: bool,
+) -> Tuple[str, List[Any]]:
+    """A new eval; nothing when the agent already has a row of that name."""
+    query = f"""
+        INSERT INTO evaluation_config (
+            template_id, evaluation_type, name, enabled, configuration
+        )
+        VALUES ($1::uuid, 'CONVERSATION_EVALS', $2, $3::boolean, $4::jsonb)
+        ON CONFLICT (template_id, name) DO NOTHING
+        RETURNING {_CONFIG_COLUMNS}
+    """
+    return query, [template_id, name, enabled, json.dumps(configuration)]
+
+
+def update_custom_eval_configuration_query(
+    template_id: str,
+    name: str,
+    configuration: Dict[str, Any],
+) -> Tuple[str, List[Any]]:
+    """Replace the eval's configuration wholesale; its flag is kept."""
+    query = f"""
+        UPDATE evaluation_config
+        SET configuration = $3::jsonb
+        WHERE template_id = $1::uuid
+          AND evaluation_type = 'CONVERSATION_EVALS'
+          AND name = $2
+          AND name <> ALL($4::text[])
+        RETURNING {_CONFIG_COLUMNS}
+    """
+    return query, [template_id, name, json.dumps(configuration), NOT_CUSTOM_EVALS]
+
+
+def set_custom_eval_enabled_query(
+    template_id: str,
+    name: str,
+    enabled: bool,
+) -> Tuple[str, List[Any]]:
+    query = f"""
+        UPDATE evaluation_config
+        SET enabled = $3::boolean
+        WHERE template_id = $1::uuid
+          AND evaluation_type = 'CONVERSATION_EVALS'
+          AND name = $2
+          AND name <> ALL($4::text[])
+        RETURNING {_CONFIG_COLUMNS}
+    """
+    return query, [template_id, name, enabled, NOT_CUSTOM_EVALS]
 
 
 def has_enabled_evaluations_query(template_id: str) -> Tuple[str, List[Any]]:

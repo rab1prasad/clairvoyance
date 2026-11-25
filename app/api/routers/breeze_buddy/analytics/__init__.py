@@ -22,6 +22,12 @@ from app.schemas.breeze_buddy.conversation_analysis import (
     ConversationTopicsResponse,
 )
 
+from .evals import (
+    get_eval_calls_analytics,
+    get_eval_dashboard_analytics,
+    get_outcome_correctness_calls_analytics,
+    get_outcome_correctness_dashboard_analytics,
+)
 from .handlers import (
     download_call_details,
     get_attempts_to_connect_analytics,
@@ -71,6 +77,10 @@ _ANALYTICS_HANDLERS: Dict[AnalyticsType, Callable[..., Awaitable]] = {
     AnalyticsType.CHATS_BY_HOUR: get_chats_by_hour_analytics,
     AnalyticsType.TOPIC_DASHBOARD: get_topic_dashboard_analytics,
     AnalyticsType.TOPIC_CONVERSATIONS: get_topic_conversations_analytics,
+    AnalyticsType.OUTCOME_CORRECTNESS_DASHBOARD: get_outcome_correctness_dashboard_analytics,
+    AnalyticsType.OUTCOME_CORRECTNESS_CALLS: get_outcome_correctness_calls_analytics,
+    AnalyticsType.EVAL_DASHBOARD: get_eval_dashboard_analytics,
+    AnalyticsType.EVAL_CALLS: get_eval_calls_analytics,
 }
 
 
@@ -93,6 +103,10 @@ async def get_analytics(
     - telephony-numbers: Per-number telephony analytics (calls, pickup, capacity)
     - conversion: Conversion funnel metrics
     - performance: Performance metrics
+    - outcome-correctness-dashboard / outcome-correctness-calls: the preset
+      outcome_correctness eval for one agent (template_id, date_from, date_to)
+    - eval-dashboard / eval-calls: one of the agent's custom evals (also
+      eval_name); a disabled eval is not found
 
     Security:
     - Automatically filters data by user's accessible merchants and shops (from JWT)
