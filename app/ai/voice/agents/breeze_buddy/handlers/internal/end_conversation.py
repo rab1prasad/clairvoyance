@@ -304,7 +304,7 @@ async def end_conversation(context: TemplateContext, args, transition_to=None):
 
         # The call's post-call evaluation job (topics, custom evals) is queued
         # by crm_mirror's finished tap, fired by the write above, once the
-        # end-of-call outcome check is done.
+        # end-of-call outcome check is done; for a web call too.
 
         # Update OpenTelemetry span with evaluation data AFTER DB write,
         # so context.lead.outcome reflects the final persisted value.

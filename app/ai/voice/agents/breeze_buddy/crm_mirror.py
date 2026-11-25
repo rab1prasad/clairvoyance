@@ -322,8 +322,9 @@ def _finished_lead_tap(lead: LeadCallTracker) -> None:
 
     It also queues the call's post-call evaluation job (its topics and
     custom evals) once the end-of-call outcome check is done, for every
-    talked-through call, CRM traffic or not: the one place a call's job is
-    queued.
+    talked-through call, phone or web, CRM traffic or not: the one place a
+    call's job is queued. A web call's bot process waits for this before it
+    exits (services/daily/bot_runner.py).
     """
     try:
         to_crm = bool(lead.merchant_id) and not is_non_customer_lead(

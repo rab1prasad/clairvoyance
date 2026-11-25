@@ -1,5 +1,6 @@
 """The outcome check: the built-in outcome_correctness eval, at the end of a
-telephony call.
+call, phone or web (a web call's bot process waits for it before it exits,
+services/daily/bot_runner.py).
 
 Before a finished call's one call.completed is sent (``crm_mirror``'s
 finished tap, already in the background), Jev is asked which of the
