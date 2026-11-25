@@ -44,6 +44,23 @@ def test_builder_maps_reasoning_scopes_key_and_omits_temperature(monkeypatch):
     assert getattr(svc._aws_params["config"], "signature_version") == "bearer"
 
 
+def test_default_chain_services_share_one_session_keyed_ones_do_not():
+    # One session per process: credentials (an STS web-identity exchange
+    # under OIDC) resolve once, not on every call's first turn.
+    def build(api_key=None):
+        return build_bedrock_llm(
+            BedrockConfig(
+                model="m", region="ap-south-1", max_tokens=16, api_key=api_key
+            )
+        )
+
+    a, b = build(), build()
+    assert a._aws_session is b._aws_session
+    keyed = build(api_key="k")
+    assert keyed._aws_session is not a._aws_session
+    assert keyed._aws_session is not build(api_key="k")._aws_session
+
+
 async def test_resolver_routes_bedrock_and_requires_region(monkeypatch):
     async def fake_get_config(name, default, _type):
         return "key"

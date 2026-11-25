@@ -7,12 +7,14 @@ do not apply.
 
 Auth is a Bedrock API key when the template names one (``api_key_name``),
 installed as the bearer token of the service's own botocore session;
-otherwise the pod's default AWS credential chain.
+otherwise the pod's default AWS credential chain, through one session shared
+by the process (``_default_chain_session``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, Optional
 
 import aioboto3
@@ -98,7 +100,22 @@ def build_bedrock_llm(config: BedrockConfig) -> AWSBedrockLLMService:
         service._aws_params["config"] = service._aws_params["config"].merge(
             Config(signature_version="bearer")
         )
+    else:
+        service._aws_session = _default_chain_session()
     return service
+
+
+@cache
+def _default_chain_session() -> aioboto3.Session:
+    """The process's one session for the default credential chain.
+
+    botocore caches resolved credentials on the session, so pipecat's
+    per-service ``aioboto3.Session()`` would re-resolve them on every call's
+    first turn — under OIDC (``AWS_ROLE_ARN`` + ``AWS_WEB_IDENTITY_TOKEN_FILE``)
+    an STS ``AssumeRoleWithWebIdentity`` round trip ahead of the first reply.
+    Shared, they resolve once and refresh themselves before expiry.
+    """
+    return aioboto3.Session()
 
 
 def _api_key_session(api_key: str) -> aioboto3.Session:
