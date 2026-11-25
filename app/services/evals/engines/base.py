@@ -36,7 +36,7 @@ from app.services.evals.engines.common import (
 from app.services.model_provider import (
     GenerateRequest,
     GenerateResponse,
-    ModelProvider,
+    resolve_provider,
 )
 
 
@@ -45,8 +45,9 @@ class EvalEngine(ABC):
     name: ClassVar[str]
     channels: ClassVar[FrozenSet[ConversationChannel]]
     # the providers this engine can be served by, by name; the config row's
-    # `provider` is validated against the keys and routed to the value
-    providers: ClassVar[Mapping[str, ModelProvider]]
+    # `provider` is validated against them and reached through
+    # model_provider.resolve_provider
+    providers: ClassVar[FrozenSet[str]]
     # the engine-owned top-level configuration keys beyond the envelope
     # (engine, provider, model): the type-level validator rejects any other
     configuration_keys: ClassVar[FrozenSet[str]]
@@ -79,6 +80,6 @@ class EvalEngine(ABC):
         """The pipeline: state -> request -> provider -> transform."""
         state = build_state(context)
         # the row picked the provider; the validator guaranteed it is one of ours
-        provider = self.providers[configuration["provider"]]
+        provider = await resolve_provider(configuration)
         response = await provider.generate(self.build_request(state, configuration))
         return self.transform(response, configuration)

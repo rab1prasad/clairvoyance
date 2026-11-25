@@ -18,10 +18,11 @@ from app.core.logger import logger
 from app.schemas.breeze_buddy.conversation_analysis import TopicExtractionResult
 from app.services.live_config.store import get_config
 from app.services.model_provider import (
-    OPENROUTER,
     GenerateRequest,
     GenerationSettings,
     Message,
+    OpenRouterProvider,
+    resolve_provider,
 )
 
 from .segments import validate_segments
@@ -56,7 +57,7 @@ def resolve_topic_evaluation_configuration(
         raw = {}
 
     provider = str(raw.get("provider") or LLMProvider.OPENAI.value).strip()
-    if provider not in [p.value for p in LLMProvider] + [OPENROUTER.name]:
+    if provider not in [p.value for p in LLMProvider] + [OpenRouterProvider.name]:
         raise ValueError(f"Unsupported topic evaluator provider: {provider}")
     sdk = str(raw.get("sdk") or "").strip() or None
     if sdk and sdk not in [s.value for s in LLMSdk]:
@@ -158,9 +159,10 @@ async def _request_llm(
     runtime: Mapping[str, Any],
 ) -> Dict[str, Any]:
     instruction = prompt + "\n\n" + _PROMPT_ONLY_RESPONSE_INSTRUCTION
-    if runtime["provider"] == OPENROUTER.name:
+    if runtime["provider"] == OpenRouterProvider.name:
         started_at = time.monotonic()
-        response = await OPENROUTER.generate(
+        openrouter = await resolve_provider({"provider": OpenRouterProvider.name})
+        response = await openrouter.generate(
             GenerateRequest(
                 model=runtime["model"],
                 input=[Message(role="user", content=transcript)],

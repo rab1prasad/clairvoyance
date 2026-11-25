@@ -882,7 +882,8 @@ LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_BASEURL = os.environ.get("LANGFUSE_BASEURL", "https://us.cloud.langfuse.com")
 
-# TypeSafe Jev (model provider, app/services/model_provider/typesafe.py).
+# TypeSafe Jev (model provider,
+# app/services/model_provider/system_one/typesafe.py).
 # Empty key = every call on it fails with a logged error
 # (a deployment mistake should be loud); nothing else is affected.
 TYPESAFE_API_KEY = os.environ.get("TYPESAFE_API_KEY", "")
@@ -890,6 +891,15 @@ TYPESAFE_API_URL = os.environ.get(
     "TYPESAFE_API_URL", "https://api.typesafe.ai/v1/systemone"
 )
 TYPESAFE_TIMEOUT_SECONDS = _positive_float("TYPESAFE_TIMEOUT_SECONDS", 30.0)
+
+# Custom System One (model provider custom,
+# app/services/model_provider/system_one/custom.py): any System One endpoint
+# other than TypeSafe's. It has no URL or key of its own: whoever uses it
+# names the config keys holding them (such as GRID_JIT_URL /
+# GRID_JIT_API_KEY, Grid's), read with get_config on every use.
+CUSTOM_SYSTEM_ONE_TIMEOUT_SECONDS = _positive_float(
+    "CUSTOM_SYSTEM_ONE_TIMEOUT_SECONDS", 30.0
+)
 
 # OpenRouter (model provider, app/services/model_provider/openrouter.py): one
 # key and one chat-completions URL front every model it routes; ``model`` is

@@ -57,12 +57,12 @@ from app.services.evals.engines.structured_judge_engine import (
     decide,
 )
 from app.services.model_provider import (
-    OPENROUTER,
-    PROVIDERS,
     GenerateRequest,
     GenerateResponse,
     GenerationSettings,
+    OpenRouterProvider,
     ProviderConfig,
+    resolve_provider,
 )
 
 TEMPLATE_ID = "00000000-0000-0000-0000-000000000001"
@@ -630,7 +630,7 @@ class FakeProvider:
 
 async def test_structured_evaluate_routes_to_the_configured_provider(monkeypatch):
     provider = FakeProvider({"answers": RECORDED_ANSWERS, "model": "jev-1.13.0-b"})
-    monkeypatch.setattr(StructuredJudgeEngine, "providers", {"typesafe": provider})
+    _route_to(provider, monkeypatch)
 
     verdict = await StructuredJudgeEngine().evaluate(
         _voice_context(), EXAMPLE_CONFIGURATION
@@ -651,12 +651,13 @@ async def test_structured_evaluate_routes_to_the_configured_provider(monkeypatch
     assert verdict.model == "jev-1.13.0-b"
 
 
-def test_engines_use_the_registered_provider_instances():
-    # close_all drains PROVIDERS; an engine holding a private instance of a
-    # provider would escape it
+async def test_engines_name_providers_the_registry_builds():
+    # an engine reaches its providers through resolve_provider, whose pooled
+    # clients close_all closes; a name it cannot build would fail every call
     for engine in ENGINES.values():
-        for name, provider in engine.providers.items():
-            assert PROVIDERS[name] is provider
+        for name in engine.providers:
+            if name != "custom":  # needs a named endpoint
+                assert (await resolve_provider({"provider": name})).name == name
 
 
 # --- the pipeline steps are the engine's: build_request and transform ------
@@ -707,18 +708,25 @@ def _chat_reply(content, finish_reason="stop", model="openai/gpt-4o-mini-2024"):
     }
 
 
+def _route_to(provider, monkeypatch):
+    """Every engine's provider, whatever the row names, is ``provider``."""
+
+    async def resolve(configuration):
+        return provider
+
+    monkeypatch.setattr("app.services.evals.engines.base.resolve_provider", resolve)
+
+
 def _openrouter_with(handler, monkeypatch):
-    """The registered OpenRouter provider on an httpx MockTransport."""
-    monkeypatch.setattr(
-        OPENROUTER,
-        "_config",
-        ProviderConfig(api_key="k", base_url="https://or.test", timeout_seconds=5),
+    """An OpenRouter provider on an httpx MockTransport, the one every engine
+    call reaches."""
+    openrouter = OpenRouterProvider(
+        ProviderConfig(api_key="k", base_url="https://or.test", timeout_seconds=5)
     )
-    monkeypatch.setattr(OPENROUTER, "_BACKOFF_BASE_SECONDS", 0.0)
-    monkeypatch.setattr(
-        OPENROUTER, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    )
-    return OPENROUTER
+    monkeypatch.setattr(openrouter, "_BACKOFF_BASE_SECONDS", 0.0)
+    openrouter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    _route_to(openrouter, monkeypatch)
+    return openrouter
 
 
 def _sent_document(request: GenerateRequest) -> Dict[str, Any]:

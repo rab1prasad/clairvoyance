@@ -30,7 +30,11 @@ from app.services.evals.engines.common import (
     Verdict,
     build_state,
 )
-from app.services.model_provider import TYPESAFE, GenerateRequest, GenerateResponse
+from app.services.model_provider import (
+    GenerateRequest,
+    GenerateResponse,
+    TypeSafeProvider,
+)
 
 __all__ = [
     "ALLOWED_QUESTION_TYPES",
@@ -312,7 +316,7 @@ class StructuredJudgeEngine(EvalEngine):
     name = "structured"
     channels = frozenset({ConversationChannel.VOICE, ConversationChannel.CHAT})
     # System One reads the questions natively
-    providers = {"typesafe": TYPESAFE}
+    providers = frozenset({TypeSafeProvider.name})
     configuration_keys = frozenset({"questions"})
 
     def validate_configuration(

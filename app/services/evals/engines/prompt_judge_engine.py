@@ -70,11 +70,11 @@ from app.services.evals.engines.common import (
     Verdict,
 )
 from app.services.model_provider import (
-    OPENROUTER,
     GenerateRequest,
     GenerateResponse,
     GenerationSettings,
     Message,
+    OpenRouterProvider,
 )
 
 __all__ = [
@@ -418,7 +418,7 @@ class PromptJudgeEngine(EvalEngine):
     name = "prompt"
     channels = frozenset({ConversationChannel.VOICE, ConversationChannel.CHAT})
     # chat models only: a rubric written in prose has no criteria array for jev
-    providers = {"openrouter": OPENROUTER}
+    providers = frozenset({OpenRouterProvider.name})
     configuration_keys = frozenset(
         {"questions", "instruction", "settings", "structured_output"}
     )

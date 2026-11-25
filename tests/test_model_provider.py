@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from app.services.model_provider import (
-    PROVIDERS,
+    CustomSystemOneProvider,
     GenerateRequest,
     GenerationSettings,
     Message,
@@ -17,7 +17,7 @@ from app.services.model_provider import (
     TypeSafeProvider,
     Usage,
     close_all,
-    get_provider,
+    resolve_provider,
 )
 
 _SCHEMA = {
@@ -59,7 +59,10 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr("app.services.model_provider.openrouter.asyncio.sleep", instant)
-    monkeypatch.setattr("app.services.model_provider.typesafe.asyncio.sleep", instant)
+    monkeypatch.setattr(
+        "app.services.model_provider.system_one.typesafe.asyncio.sleep",
+        instant,
+    )
 
 
 # --- request ------------------------------------------------------------------
@@ -296,10 +299,27 @@ async def test_no_api_key_raises_without_calling() -> None:
 # --- registry -----------------------------------------------------------------
 
 
-def test_registry() -> None:
-    assert get_provider("openrouter") is PROVIDERS["openrouter"]
+@pytest.fixture
+def fresh_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No provider built yet."""
+    monkeypatch.setattr("app.services.model_provider._PROVIDERS", {})
+
+
+@pytest.mark.parametrize(
+    "name, kind", [("openrouter", OpenRouterProvider), ("typesafe", TypeSafeProvider)]
+)
+async def test_a_provider_is_built_once_on_first_use(
+    fresh_registry: None, name: str, kind: type
+) -> None:
+    provider = await resolve_provider({"provider": name})
+    assert type(provider) is kind
+    # kept, so its pooled client is reused
+    assert await resolve_provider({"provider": name}) is provider
+
+
+async def test_an_unknown_provider_is_refused() -> None:
     with pytest.raises(ProviderError, match="unknown provider"):
-        get_provider("nope")
+        await resolve_provider({"provider": "nope"})
 
 
 async def test_close_all_closes_every_provider_even_if_one_fails(
@@ -320,15 +340,16 @@ async def test_close_all_closes_every_provider_even_if_one_fails(
             closed.append("fine")
 
     monkeypatch.setattr(
-        "app.services.model_provider.PROVIDERS", {"boom": Boom(), "fine": Fine()}
+        "app.services.model_provider._PROVIDERS",
+        {("boom", "", ""): Boom(), ("fine", "", ""): Fine()},
     )
     await close_all()  # must not raise
     assert closed == ["fine"]
 
 
-async def test_close_all_closes_pools() -> None:
-    openrouter = get_provider("openrouter")
-    typesafe = get_provider("typesafe")
+async def test_close_all_closes_pools(fresh_registry: None) -> None:
+    openrouter = await resolve_provider({"provider": "openrouter"})
+    typesafe = await resolve_provider({"provider": "typesafe"})
     assert isinstance(openrouter, OpenRouterProvider)
     assert isinstance(typesafe, TypeSafeProvider)
     openrouter._client = httpx.AsyncClient()
@@ -401,3 +422,111 @@ async def test_typesafe_client_error_is_not_retried() -> None:
         await _typesafe(handler).generate(GenerateRequest(model="jev", input=_PAYLOAD))
     assert len(calls) == 1
     assert caught.value.status == 422
+
+
+# --- custom (System One elsewhere) ---------------------------------------------
+
+
+@pytest.fixture
+def config_keys(monkeypatch: pytest.MonkeyPatch) -> Dict[str, str]:
+    """The config keys the custom provider reads, as a dict; every test starts
+    with no endpoint reached yet."""
+    values: Dict[str, str] = {}
+
+    async def get_config(key: str, default: Any, return_type: type = str) -> Any:
+        return values.get(key, default)
+
+    monkeypatch.setattr("app.services.model_provider.get_config", get_config)
+    monkeypatch.setattr("app.services.model_provider._PROVIDERS", {})
+    return values
+
+
+_GRID = {
+    "provider": "custom",
+    "api_url_name": "GRID_URL",
+    "api_key_name": "GRID_KEY",
+}
+
+
+def test_custom_speaks_typesafes_api_under_its_own_name() -> None:
+    assert issubclass(CustomSystemOneProvider, TypeSafeProvider)
+    assert CustomSystemOneProvider.name == "custom"
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        {"api_url_name": "GRID_URL", "api_key_name": "GRID_KEY"},
+        {"api_key_name": "GRID_KEY"},
+        {"api_url_name": "GRID_URL"},
+    ],
+)
+async def test_typesafe_always_runs_on_its_own_endpoint(
+    config_keys: Dict[str, str], names: Dict[str, str]
+) -> None:
+    # names are refused when a row is saved; one that got past (an edit in
+    # the DB) never sends TypeSafe's key to another host
+    config_keys.update(GRID_URL="https://grid.test/v1/systemone", GRID_KEY="k")
+    typesafe = await resolve_provider({"provider": "typesafe"})
+    assert await resolve_provider({"provider": "typesafe", **names}) is typesafe
+
+
+async def test_custom_posts_to_the_named_url_with_the_named_key(
+    config_keys: Dict[str, str],
+) -> None:
+    config_keys.update(GRID_URL="https://grid.test/v1/systemone", GRID_KEY="k")
+    seen: List[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_JUDGED)
+
+    grid = await resolve_provider(_GRID)
+    assert isinstance(grid, CustomSystemOneProvider)
+    grid._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await grid.generate(GenerateRequest(model="jev", input=_PAYLOAD))
+
+    assert str(seen[0].url) == "https://grid.test/v1/systemone"
+    assert seen[0].headers["Authorization"] == "Bearer k"
+    assert json.loads(seen[0].content) == {**_PAYLOAD, "model": "jev"}
+    assert response.structured == _JUDGED
+    # one per endpoint, so its pooled client is reused
+    assert await resolve_provider(_GRID) is grid
+
+
+async def test_a_changed_key_is_a_new_endpoint(config_keys: Dict[str, str]) -> None:
+    config_keys.update(GRID_URL="https://grid.test", GRID_KEY="old")
+    before = await resolve_provider(_GRID)
+    config_keys["GRID_KEY"] = "new"
+    after = await resolve_provider(_GRID)
+    assert isinstance(after, CustomSystemOneProvider) and after is not before
+    assert after._config.api_key == "new"
+
+
+@pytest.mark.parametrize(
+    "names, error",
+    [
+        ({}, "api_url_name and api_key_name are required"),
+        ({"api_key_name": "GRID_KEY"}, "api_url_name and api_key_name are required"),
+        ({"api_url_name": "GRID_URL"}, "api_url_name and api_key_name are required"),
+        ({"api_url_name": "NO_URL", "api_key_name": "GRID_KEY"}, "API URL not found"),
+        ({"api_url_name": "GRID_URL", "api_key_name": "NO_KEY"}, "API key not found"),
+    ],
+)
+async def test_custom_without_its_endpoint_is_refused(
+    config_keys: Dict[str, str], names: Dict[str, str], error: str
+) -> None:
+    config_keys.update(GRID_URL="https://grid.test", GRID_KEY="k")
+    with pytest.raises(ProviderError, match=error):
+        await resolve_provider({"provider": "custom", **names})
+
+
+async def test_close_all_closes_custom_endpoints(
+    config_keys: Dict[str, str],
+) -> None:
+    config_keys.update(GRID_URL="https://grid.test", GRID_KEY="k")
+    grid = await resolve_provider(_GRID)
+    assert isinstance(grid, CustomSystemOneProvider)
+    grid._client = httpx.AsyncClient()
+    await close_all()
+    assert grid._client is None

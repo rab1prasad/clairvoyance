@@ -167,7 +167,13 @@ async def test_openrouter_topics_go_through_the_model_provider(
             usage=Usage(input_tokens=120, output_tokens=40),
         )
     )
-    monkeypatch.setattr(extractor.OPENROUTER, "generate", generate)
+    openrouter = SimpleNamespace(name="openrouter", generate=generate)
+
+    async def resolve_provider(configuration: Any) -> Any:
+        assert configuration == {"provider": "openrouter"}
+        return openrouter
+
+    monkeypatch.setattr(extractor, "resolve_provider", resolve_provider)
     configuration = {
         "provider": "openrouter",
         "model": "openai/gpt-4o-mini",
